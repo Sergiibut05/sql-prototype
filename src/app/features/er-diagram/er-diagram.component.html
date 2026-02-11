@@ -1,0 +1,32 @@
+<canvas #rendererCanvas></canvas>
+
+<div class="controls-panel">
+  <div class="step-info">
+    <span class="step-label">Step</span>
+    <span class="step-num">{{ currentStep }}</span>
+    <span class="step-sep">/</span>
+    <span class="step-total">{{ totalSteps }}</span>
+  </div>
+  <div class="controls">
+    <button (click)="simulator.prev()" [disabled]="currentStep <= 1" title="Previous">
+      &#9664;
+    </button>
+    <button (click)="isRunning ? simulator.stop() : simulator.start()"
+            [class.active]="isRunning" title="Play/Pause">
+      {{ isRunning ? '\u23F8' : '\u25B6' }}
+    </button>
+    <button (click)="simulator.next()" [disabled]="currentStep >= totalSteps" title="Next">
+      &#9654;
+    </button>
+  </div>
+  <div class="hint">Press <kbd>H</kbd> for debug GUI</div>
+</div>
+
+<div class="query-panel" [class.expanded]="showQuery">
+  <button class="toggle-query" (click)="showQuery = !showQuery">
+    {{ showQuery ? 'Hide SQL' : 'Show SQL' }}
+  </button>
+  @if (showQuery) {
+    <pre class="query-text">{{ currentQuery }}</pre>
+  }
+</div>
