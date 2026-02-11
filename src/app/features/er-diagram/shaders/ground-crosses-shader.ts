@@ -8,6 +8,7 @@ export const GroundCrossesShader = {
     uCrossColor: { value: new THREE.Color(0x2a3f6a) },
     uBaseColor: { value: new THREE.Color(0x080c14) },
     uFadeDistance: { value: 500.0 },
+    uCrossOpacity: { value: 0.85 },
   },
   vertexShader: /* glsl */ `
     varying vec3 vWorldPosition;
@@ -27,6 +28,7 @@ export const GroundCrossesShader = {
     uniform vec3 uCrossColor;
     uniform vec3 uBaseColor;
     uniform float uFadeDistance;
+    uniform float uCrossOpacity;
 
     varying vec3 vWorldPosition;
     varying float vDistToCamera;
@@ -36,8 +38,8 @@ export const GroundCrossesShader = {
     }
 
     float drawCross(vec2 pos, float size, float feather) {
-      float arm = size * 3.5;
-      float thickness = size;
+      float arm = size * 4.0;
+      float thickness = size * 1.2;
       float h = (1.0 - antialiasedStep(thickness, abs(pos.y), feather))
               * (1.0 - antialiasedStep(arm, abs(pos.x), feather));
       float v = (1.0 - antialiasedStep(thickness, abs(pos.x), feather))
@@ -50,22 +52,28 @@ export const GroundCrossesShader = {
       float tileSize = 1.0 / uCrossDensity;
       vec2 tilePos = mod(worldXZ + tileSize * 0.5, tileSize) - tileSize * 0.5;
 
-      float feather = fwidth(tilePos.x) * 1.5;
+      float feather = fwidth(tilePos.x) * 1.2;
       float cross = drawCross(tilePos, uCrossSize * tileSize, feather);
 
-      // Distance-based fade
+      // Distance-based fade (much more generous range)
       float dist = length(worldXZ);
-      float fade = 1.0 - smoothstep(uFadeDistance * 0.15, uFadeDistance, dist);
+      float fade = 1.0 - smoothstep(uFadeDistance * 0.4, uFadeDistance * 1.2, dist);
 
-      // Camera distance fade
-      float camFade = 1.0 - smoothstep(uFadeDistance * 0.5, uFadeDistance * 1.5, vDistToCamera);
+      // Camera distance fade (also more generous)
+      float camFade = 1.0 - smoothstep(uFadeDistance * 0.8, uFadeDistance * 2.0, vDistToCamera);
 
       // Subtle animated pulse
-      float pulse = sin(uTime * 0.3 + dist * 0.005) * 0.12 + 0.88;
+      float pulse = sin(uTime * 0.3 + dist * 0.005) * 0.08 + 0.92;
 
       float combinedFade = fade * camFade;
-      vec3 crossColor = uCrossColor * pulse;
-      vec3 color = mix(uBaseColor, crossColor, cross * combinedFade);
+
+      // Cross is drawn additively on top of base color to avoid bloom blowout
+      // The base color stays dark and stable; crosses are painted on top
+      vec3 crossContrib = uCrossColor * pulse * cross * combinedFade * uCrossOpacity;
+      vec3 color = uBaseColor + crossContrib;
+
+      // Clamp to prevent bloom from blowing out
+      color = min(color, vec3(1.0));
 
       gl_FragColor = vec4(color, 1.0);
     }

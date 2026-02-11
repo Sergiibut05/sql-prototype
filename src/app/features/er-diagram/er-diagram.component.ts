@@ -31,7 +31,11 @@ const NODE_WIDTH = 38;
 const NODE_PADDING = 1.5;
 const TABLE_DEPTH = 2.0;
 const CANVAS_SCALE = 14; // px per graph unit for textures
-const MAX_CURVE_PTS = 48;
+const MAX_LINE_PTS = 16; // max points in a polyline
+
+// ── Edge routing ─────────────────────────────────────────────────
+const EDGE_GAP = 3; // gap between the table edge and where the line starts
+const EDGE_CLEARANCE = 5; // clearance around tables for avoidance checks
 
 // ── Colors ────────────────────────────────────────────────────────
 const C = {
@@ -105,6 +109,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     tops: THREE.MeshStandardMaterial[];
   } = { sides: [], edges: [], tops: [] };
 
+  // ── Camera lerp ───────────────────────────────────────────────
+  private cameraTarget = new THREE.Vector3(0, 200, 160);
+  private cameraLookTarget = new THREE.Vector3(0, 0, 0);
+  private cameraLerpSpeed = 1.8;
+
   // ── Debug params ──────────────────────────────────────────────
   private p = {
     camY: 200,
@@ -121,13 +130,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     crossDensity: 0.06,
     crossSize: 0.012,
     crossFade: 500,
+    crossOpacity: 0.85,
     linkHeight: TABLE_DEPTH + 0.5,
-    chargeStr: -80,
+    chargeStr: -40,
     alphaDecay: 0.02,
     velDecay: 0.3,
+    cameraLerpSpeed: 1.8,
     // Colors
     tableBody: '#0f1322',
     tableEdge: '#2a2060',
+    headerStart: '#4f46e5',
+    headerEnd: '#7c3aed',
     crossColor: '#2a3f6a',
     groundBase: '#080c14',
   };
@@ -136,7 +149,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     private sqlParser: SqlParserService,
     public simulator: QuerySimulatorService,
     private ngZone: NgZone,
-  ) {}
+  ) { }
 
   // ================================================================
   //  Lifecycle
@@ -181,11 +194,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.camera.position.set(0, this.p.camY, this.p.camZ);
     this.camera.lookAt(0, 0, 0);
 
-    // Renderer
+    // Renderer — high performance + antialias
     this.renderer = new THREE.WebGLRenderer({
       canvas: el,
       antialias: true,
       alpha: false,
+      powerPreference: 'high-performance',
     });
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -291,17 +305,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       )
       .d3AlphaDecay(this.p.alphaDecay)
       .d3VelocityDecay(this.p.velDecay)
-      .warmupTicks(60)
+      .warmupTicks(80)
       .cooldownTime(8000);
 
-    // Collision force
+    // Collision force — tighter layout
     (this.graph as any).d3Force(
       'collide',
       forceCollide()
         .radius((d: any) => {
           const dims = this.nodeDimensions.get(d.id);
           if (dims) {
-            return Math.sqrt(dims.w ** 2 + dims.h ** 2) / 2 + 6;
+            return Math.sqrt(dims.w ** 2 + dims.h ** 2) / 2 + 4;
           }
           return this.p.collideRadius;
         })
@@ -309,10 +323,16 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         .iterations(this.p.collideIter),
     );
 
-    // Adjust charge force
+    // Charge force — reduced to bring groups closer
     (this.graph as any)
       .d3Force('charge')
       ?.strength(this.p.chargeStr);
+
+    // Link distance — shorter to compact layout
+    const linkForce = (this.graph as any).d3Force('link');
+    if (linkForce) {
+      linkForce.distance(45);
+    }
 
     // Rotate graph group so layout (XY) lies on ground (XZ)
     this.graph.rotation.x = -Math.PI / 2;
@@ -330,11 +350,14 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     // Camera
     const cam = this.gui.addFolder('Camera');
-    cam.add(this.p, 'camY', 50, 500, 1).onChange(() => this.applyCam());
-    cam.add(this.p, 'camZ', 0, 400, 1).onChange(() => this.applyCam());
+    cam.add(this.p, 'camY', 50, 500, 1).onChange(() => this.setCameraTarget());
+    cam.add(this.p, 'camZ', 0, 400, 1).onChange(() => this.setCameraTarget());
     cam.add(this.p, 'fov', 20, 90, 1).onChange(() => {
       this.camera.fov = this.p.fov;
       this.camera.updateProjectionMatrix();
+    });
+    cam.add(this.p, 'cameraLerpSpeed', 0.3, 8, 0.1).name('Lerp Speed').onChange(() => {
+      this.cameraLerpSpeed = this.p.cameraLerpSpeed;
     });
 
     // Layout
@@ -375,8 +398,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     gnd.add(this.p, 'crossSize', 0.001, 0.05, 0.001).onChange(() => {
       this.groundUniforms['uCrossSize'].value = this.p.crossSize;
     });
-    gnd.add(this.p, 'crossFade', 100, 1500, 10).onChange(() => {
+    gnd.add(this.p, 'crossFade', 100, 2000, 10).onChange(() => {
       this.groundUniforms['uFadeDistance'].value = this.p.crossFade;
+    });
+    gnd.add(this.p, 'crossOpacity', 0.1, 1.5, 0.01).name('Cross Opacity').onChange(() => {
+      this.groundUniforms['uCrossOpacity'].value = this.p.crossOpacity;
     });
     gnd.addColor(this.p, 'crossColor').name('Cross Color').onChange(() => {
       this.groundUniforms['uCrossColor'].value.set(this.p.crossColor);
@@ -395,6 +421,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         m.color.set(this.p.tableEdge);
         m.emissive.set(this.p.tableEdge);
       }
+    });
+    tbl.addColor(this.p, 'headerStart').name('Header Start').onChange(() => {
+      this.rebuildAllTableTextures();
+    });
+    tbl.addColor(this.p, 'headerEnd').name('Header End').onChange(() => {
+      this.rebuildAllTableTextures();
     });
 
     // Start hidden
@@ -423,12 +455,23 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   }
 
   private applyGraphData(data: GraphData): void {
+    // Clear old materials refs when rebuilding
+    this.tableMaterials = { sides: [], edges: [], tops: [] };
+    this.nodeColumnOffsets.clear();
+    this.nodeDimensions.clear();
+
     (this.graph as any).graphData({
       nodes: data.nodes,
       links: data.links,
     });
-    // Fit camera after layout settles
-    setTimeout(() => this.fitCamera(), 1500);
+
+    // Fit camera IMMEDIATELY after warmup ticks (positions are already set)
+    // Use requestAnimationFrame to ensure positions are applied
+    requestAnimationFrame(() => {
+      this.fitCamera();
+      // Re-fit again shortly after for final stabilization
+      setTimeout(() => this.fitCamera(), 400);
+    });
   }
 
   // ================================================================
@@ -511,6 +554,9 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     body.receiveShadow = true;
     group.add(body);
 
+    // Store node ref for texture rebuild
+    (group as any).__nodeRef = node;
+
     return group;
   }
 
@@ -534,11 +580,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     ctx.fillStyle = '#141a2a';
     ctx.fillRect(0, 0, cW, cH);
 
-    // Header gradient
+    // Header gradient — uses current GUI colors
     const hH = Math.round(HEADER_HEIGHT * CANVAS_SCALE);
     const grad = ctx.createLinearGradient(0, 0, cW, 0);
-    grad.addColorStop(0, C.headerStart);
-    grad.addColorStop(1, C.headerEnd);
+    grad.addColorStop(0, this.p.headerStart);
+    grad.addColorStop(1, this.p.headerEnd);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, cW, hH);
 
@@ -611,38 +657,53 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     return canvas;
   }
 
+  /**
+   * Rebuild all table canvas textures when header colors change in GUI.
+   */
+  private rebuildAllTableTextures(): void {
+    const data = (this.graph as any).graphData();
+    if (!data?.nodes?.length) return;
+
+    this.graph.children.forEach((child: any) => {
+      child.traverse?.((obj: any) => {
+        if (obj.__nodeRef) {
+          const node = obj.__nodeRef as GraphNode;
+          const dims = this.nodeDimensions.get(node.id);
+          if (dims) {
+            const canvas = this.createTableCanvas(node, dims.w, dims.h);
+            const body = obj.children?.[0] as THREE.Mesh;
+            if (body && Array.isArray(body.material)) {
+              const topMat = body.material[4] as THREE.MeshStandardMaterial;
+              if (topMat?.map) {
+                const tex = topMat.map as THREE.CanvasTexture;
+                (tex as any).image = canvas;
+                tex.needsUpdate = true;
+              }
+            }
+          }
+        }
+      });
+    });
+  }
+
   // ================================================================
-  //  Link (connector) rendering
+  //  Link (connector) rendering — ORTHOGONAL ROUTING
   // ================================================================
 
   private createLinkLine(link: any): THREE.Object3D {
     const group = new THREE.Group();
     const color = this.getLinkColor(link);
 
-    // Outer glow
-    const glowGeo = new THREE.BufferGeometry();
-    glowGeo.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute(new Float32Array(MAX_CURVE_PTS * 3), 3),
-    );
-    const glowMat = new THREE.LineBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-    });
-    group.add(new THREE.Line(glowGeo, glowMat));
-
     // Core line
     const coreGeo = new THREE.BufferGeometry();
     coreGeo.setAttribute(
       'position',
-      new THREE.Float32BufferAttribute(new Float32Array(MAX_CURVE_PTS * 3), 3),
+      new THREE.Float32BufferAttribute(new Float32Array(MAX_LINE_PTS * 3), 3),
     );
     const coreMat = new THREE.LineBasicMaterial({
       color,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.85,
     });
     group.add(new THREE.Line(coreGeo, coreMat));
 
@@ -661,6 +722,109 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     return group;
   }
 
+  /**
+   * Build an orthogonal (only horizontal/vertical segments) polyline
+   * between two column anchor points on two tables.
+   *
+   * Strategy (like Supabase / pgAdmin / dbdiagram):
+   *  1. Lines ALWAYS exit and enter from left or right side of a table
+   *     (never top/bottom). This matches how ER tools work.
+   *  2. The Y of the exit/entry point is at the specific column row.
+   *  3. Decide side: if target is to the right, exit right → enter left.
+   *     If target is to the left, exit left → enter right.
+   *     If they overlap on X, both exit on the same side (U-route).
+   *  4. Route: exit horizontal stub → vertical segment → entry horizontal stub.
+   *     All segments are strictly axis-aligned.
+   */
+  private buildOrthogonalPath(
+    sx: number, sy: number,  // source table center + column Y offset
+    tx: number, ty: number,  // target table center + column Y offset
+    srcId: string, tgtId: string,
+    z: number,
+  ): THREE.Vector3[] {
+    const srcDims = this.nodeDimensions.get(srcId) || { w: NODE_WIDTH, h: 15 };
+    const tgtDims = this.nodeDimensions.get(tgtId) || { w: NODE_WIDTH, h: 15 };
+
+    const srcHW = srcDims.w / 2;
+    const tgtHW = tgtDims.w / 2;
+
+    const dx = tx - sx; // positive = target is to the right
+
+    // Source and target table edge X coordinates
+    const srcRight = sx + srcHW;
+    const srcLeft = sx - srcHW;
+    const tgtRight = tx + tgtHW;
+    const tgtLeft = tx - tgtHW;
+
+    let exitX: number;
+    let entryX: number;
+    let midX: number;
+
+    // Determine if tables overlap on X axis
+    const xOverlap = srcRight > tgtLeft && tgtRight > srcLeft;
+
+    if (!xOverlap && dx >= 0) {
+      // Target is to the right and no overlap → exit right, enter left
+      exitX = srcRight + EDGE_GAP;
+      entryX = tgtLeft - EDGE_GAP;
+      midX = (exitX + entryX) / 2;
+    } else if (!xOverlap && dx < 0) {
+      // Target is to the left and no overlap → exit left, enter right
+      exitX = srcLeft - EDGE_GAP;
+      entryX = tgtRight + EDGE_GAP;
+      midX = (exitX + entryX) / 2;
+    } else {
+      // Tables overlap on X (nearly stacked) → U-route around one side
+      // Pick the side that has the most room
+      const rightEdge = Math.max(srcRight, tgtRight);
+      const leftEdge = Math.min(srcLeft, tgtLeft);
+
+      // Route to whichever side is shorter total distance
+      const routeRight = rightEdge + EDGE_GAP + 15;
+      const routeLeft = leftEdge - EDGE_GAP - 15;
+
+      // Pick the side where both tables have their closest edges
+      if (Math.abs(dx) < 1) {
+        // Truly stacked — go right
+        exitX = srcRight + EDGE_GAP;
+        entryX = tgtRight + EDGE_GAP;
+        midX = routeRight;
+      } else if (dx >= 0) {
+        exitX = srcRight + EDGE_GAP;
+        entryX = tgtRight + EDGE_GAP;
+        midX = routeRight;
+      } else {
+        exitX = srcLeft - EDGE_GAP;
+        entryX = tgtLeft - EDGE_GAP;
+        midX = routeLeft;
+      }
+    }
+
+    // Build the waypoints: horizontal stub → vertical → horizontal stub
+    // All segments are axis-aligned (orthogonal)
+    const pts: THREE.Vector3[] = [];
+
+    if (Math.abs(sy - ty) < 0.5 && !xOverlap) {
+      // Same row Y AND no overlap → straight horizontal line (no bends)
+      pts.push(new THREE.Vector3(exitX, sy, z));
+      pts.push(new THREE.Vector3(entryX, ty, z));
+    } else if (xOverlap) {
+      // U-route: exit → go to midX → vertical → come back → entry
+      pts.push(new THREE.Vector3(exitX, sy, z));
+      pts.push(new THREE.Vector3(midX, sy, z));
+      pts.push(new THREE.Vector3(midX, ty, z));
+      pts.push(new THREE.Vector3(entryX, ty, z));
+    } else {
+      // Z-route (standard): exit → midX at source Y → midX at target Y → entry
+      pts.push(new THREE.Vector3(exitX, sy, z));
+      pts.push(new THREE.Vector3(midX, sy, z));
+      pts.push(new THREE.Vector3(midX, ty, z));
+      pts.push(new THREE.Vector3(entryX, ty, z));
+    }
+
+    return pts;
+  }
+
   private updateLinkLine(
     obj: THREE.Group,
     coords: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number } },
@@ -670,10 +834,10 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     if (isNaN(start.x) || isNaN(end.x)) return true;
 
     // ── Source / target positions ────────────────────────────
-    let sx = start.x,
-      sy = start.y;
-    let tx = end.x,
-      ty = end.y;
+    let sy = start.y;
+    let ty = end.y;
+    const sx = start.x;
+    const tx = end.x;
 
     // Column Y-offsets
     const srcId =
@@ -690,72 +854,33 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       if (off?.has(link.targetColumn)) ty += off.get(link.targetColumn)!;
     }
 
-    const z = this.p.linkHeight; // above table top
-    const halfW = NODE_WIDTH / 2 + 3;
+    const z = this.p.linkHeight;
 
-    // ── Waypoints for orthogonal-ish routing ─────────────────
-    let waypoints: THREE.Vector3[];
-    const dx = tx - sx;
+    // ── Build orthogonal path ───────────────────────────────
+    const waypoints = this.buildOrthogonalPath(sx, sy, tx, ty, srcId, tgtId, z);
 
-    if (Math.abs(dx) < NODE_WIDTH * 0.6) {
-      // Nodes nearly aligned on X → route around to one side
-      const routeX =
-        Math.max(sx, tx) + halfW + 12;
-      waypoints = [
-        new THREE.Vector3(sx + halfW, sy, z),
-        new THREE.Vector3(routeX, sy, z),
-        new THREE.Vector3(routeX, ty, z),
-        new THREE.Vector3(tx + halfW, ty, z),
-      ];
-    } else {
-      const exitDir = dx > 0 ? 1 : -1;
-      const exitX = sx + halfW * exitDir;
-      const enterX = tx - halfW * exitDir;
-      const midX = (exitX + enterX) / 2;
-      waypoints = [
-        new THREE.Vector3(exitX, sy, z),
-        new THREE.Vector3(midX, sy, z),
-        new THREE.Vector3(midX, ty, z),
-        new THREE.Vector3(enterX, ty, z),
-      ];
+    // Fill position buffer
+    const totalPts = waypoints.length;
+    const flat = new Float32Array(MAX_LINE_PTS * 3); // zero-filled
+    for (let i = 0; i < totalPts; i++) {
+      flat[i * 3] = waypoints[i].x;
+      flat[i * 3 + 1] = waypoints[i].y;
+      flat[i * 3 + 2] = waypoints[i].z;
     }
 
-    // Smooth curve
-    const curve = new THREE.CatmullRomCurve3(
-      waypoints,
-      false,
-      'catmullrom',
-      0.3,
-    );
-    const pts = curve.getPoints(MAX_CURVE_PTS - 1);
+    const coreLine = obj.children[0] as THREE.Line;
+    const cone = obj.children[1] as THREE.Mesh;
 
-    // Update glow + core geometries
-    const flat = new Float32Array(pts.length * 3);
-    for (let i = 0; i < pts.length; i++) {
-      flat[i * 3] = pts[i].x;
-      flat[i * 3 + 1] = pts[i].y;
-      flat[i * 3 + 2] = pts[i].z;
-    }
+    const attr = coreLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+    (attr.array as Float32Array).set(flat);
+    attr.needsUpdate = true;
+    coreLine.geometry.setDrawRange(0, totalPts);
+    coreLine.geometry.computeBoundingSphere();
 
-    const glowLine = obj.children[0] as THREE.Line;
-    const coreLine = obj.children[1] as THREE.Line;
-    const cone = obj.children[2] as THREE.Mesh;
-
-    const updateGeo = (line: THREE.Line) => {
-      const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
-      (attr.array as Float32Array).set(flat);
-      attr.needsUpdate = true;
-      line.geometry.setDrawRange(0, pts.length);
-      line.geometry.computeBoundingSphere();
-    };
-
-    updateGeo(glowLine);
-    updateGeo(coreLine);
-
-    // Arrow cone at end
-    if (pts.length >= 2) {
-      const last = pts[pts.length - 1];
-      const prev = pts[pts.length - 2];
+    // Arrow cone at end — point it in the direction of the last segment
+    if (totalPts >= 2) {
+      const last = waypoints[totalPts - 1];
+      const prev = waypoints[totalPts - 2];
       cone.position.copy(last);
       const dir = new THREE.Vector3()
         .subVectors(last, prev)
@@ -788,9 +913,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     }
   }
 
-  private applyCam(): void {
-    this.camera.position.set(0, this.p.camY, this.p.camZ);
-    this.camera.lookAt(0, 0, 0);
+  private setCameraTarget(): void {
+    this.cameraTarget.set(0, this.p.camY, this.p.camZ);
   }
 
   private fitCamera(): void {
@@ -815,6 +939,9 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     if (!isFinite(minX)) return;
 
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
     const spanX = maxX - minX + NODE_WIDTH * 2;
     const spanY = maxY - minY + 40;
     const span = Math.max(spanX, spanY, 80);
@@ -822,9 +949,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
     const dist = span / (2 * Math.tan(fovRad / 2));
 
-    this.p.camY = dist * 0.85 + 40;
-    this.p.camZ = dist * 0.5 + 30;
-    this.applyCam();
+    // Set target for smooth lerp — no jump, starts immediately
+    this.p.camY = dist * 0.8 + 30;
+    this.p.camZ = dist * 0.45 + 25;
+    this.cameraTarget.set(centerX, this.p.camY, this.p.camZ + centerY);
+    this.cameraLookTarget.set(centerX, 0, centerY);
   }
 
   // ================================================================
@@ -839,6 +968,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     if (this.groundUniforms['uTime']) {
       this.groundUniforms['uTime'].value += dt;
     }
+
+    // ── Smooth camera lerp ──────────────────────────────────
+    const lerpFactor = 1.0 - Math.exp(-this.cameraLerpSpeed * dt);
+    this.camera.position.lerp(this.cameraTarget, lerpFactor);
+    this.camera.lookAt(this.cameraLookTarget);
 
     // MUST call tickFrame — THREE.Group has no geometry so onBeforeRender
     // is never invoked by the renderer; without this call the d3-force
