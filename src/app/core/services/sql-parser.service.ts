@@ -66,10 +66,10 @@ export class SqlParserService {
     aliasToId: Map<string, string>,
   ): void {
     if (item.table) {
-      const schema = item.db || '';
-      const tableName = item.table;
+      const schema = this.colStr(item.db) || this.colStr(item.schema) || '';
+      const tableName = this.colStr(item.table);
       const id = schema ? `${schema}.${tableName}` : tableName;
-      const alias = item.as || tableName;
+      const alias = this.colStr(item.as) || tableName;
 
       if (!nodesMap.has(id)) {
         nodesMap.set(id, {
@@ -119,10 +119,10 @@ export class SqlParserService {
       const right = on.right;
 
       if (left.type === 'column_ref' && right.type === 'column_ref') {
-        const leftTable = left.table;
-        const rightTable = right.table;
-        const leftCol = left.column;
-        const rightCol = right.column;
+        const leftTable = this.colStr(left.table);
+        const rightTable = this.colStr(right.table);
+        const leftCol = this.colStr(left.column);
+        const rightCol = this.colStr(right.column);
 
         const sourceId = aliasToId.get(leftTable) || leftTable;
         const targetId = aliasToId.get(rightTable) || rightTable;
@@ -157,6 +157,19 @@ export class SqlParserService {
     if (node && node.columns && !node.columns.includes(column)) {
       node.columns.push(column);
     }
+  }
+
+  /** node-sql-parser may return column / table as an object instead of string */
+  private colStr(v: any): string {
+    if (typeof v === 'string') return v;
+    if (v == null) return '';
+    // { expr: { type, value } }  or  { column: 'name' }  or  { value: 'name' }
+    if (typeof v === 'object') {
+      return (
+        v.expr?.value ?? v.expr?.column ?? v.value ?? v.column ?? String(v)
+      );
+    }
+    return String(v);
   }
 
   private normalizeJoinType(

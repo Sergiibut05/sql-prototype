@@ -98,6 +98,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   private subs = new Subscription();
   private textures: THREE.Texture[] = [];
 
+  // ── Stored materials for live color updates ──────────────────
+  private tableMaterials: {
+    sides: THREE.MeshStandardMaterial[];
+    edges: THREE.MeshStandardMaterial[];
+    tops: THREE.MeshStandardMaterial[];
+  } = { sides: [], edges: [], tops: [] };
+
   // ── Debug params ──────────────────────────────────────────────
   private p = {
     camY: 200,
@@ -118,6 +125,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     chargeStr: -80,
     alphaDecay: 0.02,
     velDecay: 0.3,
+    // Colors
+    tableBody: '#0f1322',
+    tableEdge: '#2a2060',
+    crossColor: '#2a3f6a',
+    groundBase: '#080c14',
   };
 
   constructor(
@@ -366,6 +378,24 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     gnd.add(this.p, 'crossFade', 100, 1500, 10).onChange(() => {
       this.groundUniforms['uFadeDistance'].value = this.p.crossFade;
     });
+    gnd.addColor(this.p, 'crossColor').name('Cross Color').onChange(() => {
+      this.groundUniforms['uCrossColor'].value.set(this.p.crossColor);
+    });
+    gnd.addColor(this.p, 'groundBase').name('Base Color').onChange(() => {
+      this.groundUniforms['uBaseColor'].value.set(this.p.groundBase);
+    });
+
+    // Table colors
+    const tbl = this.gui.addFolder('Table Colors');
+    tbl.addColor(this.p, 'tableBody').name('Body / Sides').onChange(() => {
+      for (const m of this.tableMaterials.sides) m.color.set(this.p.tableBody);
+    });
+    tbl.addColor(this.p, 'tableEdge').name('Edge Glow').onChange(() => {
+      for (const m of this.tableMaterials.edges) {
+        m.color.set(this.p.tableEdge);
+        m.emissive.set(this.p.tableEdge);
+      }
+    });
 
     // Start hidden
     this.gui.hide();
@@ -462,6 +492,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       emissive: 0x1a1050,
       emissiveIntensity: 0.3,
     });
+
+    // Store material refs for live GUI color updates
+    this.tableMaterials.sides.push(sideMat);
+    this.tableMaterials.edges.push(edgeMat);
+    this.tableMaterials.tops.push(topMat);
 
     const body = new THREE.Mesh(bodyGeo, [
       sideMat, // +X
@@ -805,7 +840,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.groundUniforms['uTime'].value += dt;
     }
 
-    // Render via composer (RenderPass triggers graph's onBeforeRender)
+    // MUST call tickFrame — THREE.Group has no geometry so onBeforeRender
+    // is never invoked by the renderer; without this call the d3-force
+    // simulation runs but node positions are never applied.
+    (this.graph as any).tickFrame();
+
+    // Render via composer
     this.composer.render();
   }
 
