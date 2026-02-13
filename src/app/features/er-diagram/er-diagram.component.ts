@@ -12,7 +12,6 @@ import ThreeForceGraph from 'three-forcegraph';
 import { forceCollide } from 'd3-force-3d';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import GUI from 'lil-gui';
@@ -23,6 +22,7 @@ import { QuerySimulatorService } from '../../core/services/query-simulator.servi
 import { GraphNode, GraphData } from '../../shared/models/graph.model';
 import { GroundCrossesShader } from './shaders/ground-crosses-shader';
 import { VignetteShader } from './shaders/vignette-shader';
+import { CableShader } from './shaders/cable-shader';
 
 // ── Layout constants ──────────────────────────────────────────────
 const ROW_HEIGHT = 3.5;
@@ -30,12 +30,16 @@ const HEADER_HEIGHT = 5;
 const NODE_WIDTH = 38;
 const NODE_PADDING = 1.5;
 const TABLE_DEPTH = 2.0;
-const CANVAS_SCALE = 14; // px per graph unit for textures
-const MAX_LINE_PTS = 16; // max points in a polyline
+const CANVAS_SCALE = 14;
+const MAX_LINE_PTS = 16;
 
 // ── Edge routing ─────────────────────────────────────────────────
-const EDGE_GAP = 3; // gap between the table edge and where the line starts
-const EDGE_CLEARANCE = 5; // clearance around tables for avoidance checks
+const EDGE_GAP = 0;           // no gap — cables connect flush to table edges
+const EDGE_CLEARANCE = 5;
+
+// ── Cable geometry ───────────────────────────────────────────────
+const CABLE_WIDTH = 0.5;      // width of the flat ribbon cable
+const CABLE_STRIPE_WORLD_SCALE = 0.08; // stripe period in world units (consistent across all cables)
 
 // ── Colors ────────────────────────────────────────────────────────
 const C = {
@@ -56,6 +60,16 @@ const C = {
   linkFull: 0xc084fc,
   linkDefault: 0x60a5fa,
 };
+
+// ── Transition ───────────────────────────────────────────────────
+const TRANSITION_SINK_DURATION = 1.8;    // seconds — tables sink below ground (slow & deliberate)
+const TRANSITION_PAUSE = 0.30;           // pause between sink and rise
+const SINK_DEPTH = -80;                  // how far below ground tables sink
+
+// ── Reveal (Bruno Simon folio-2019 style) ────────────────────────
+const REVEAL_DURATION = 3.0;             // total reveal animation time (seconds)
+const REVEAL_Z_AMPLITUDE = 25.0;         // how far nodes are displaced below ground at start
+const REVEAL_WAVE_SCALE = 30.0;          // controls wave spread from center (higher = more staggered)
 
 @Component({
   selector: 'app-er-diagram',
@@ -96,7 +110,9 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   // ── Shader uniforms refs ──────────────────────────────────────
   private groundUniforms: Record<string, THREE.IUniform> = {};
   private vignettePass!: ShaderPass;
-  private bloomPass!: UnrealBloomPass;
+
+  // ── Cable shader uniforms (shared across all cables) ──────────
+  private cableUniforms: Record<string, THREE.IUniform> = {};
 
   // ── Disposables ───────────────────────────────────────────────
   private subs = new Subscription();
@@ -113,6 +129,23 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   private cameraTarget = new THREE.Vector3(0, 200, 160);
   private cameraLookTarget = new THREE.Vector3(0, 0, 0);
   private cameraLerpSpeed = 1.8;
+  private currentCameraSpeed = 1.8; // smoothed camera speed (avoids jerk on transition end)
+  private cameraLookCurrent = new THREE.Vector3(0, 0, 0); // smoothed lookAt
+
+  // ── Transition state ──────────────────────────────────────────
+  private transitionPhase: 'idle' | 'sinking' | 'pause' | 'revealing' = 'idle';
+  private transitionTimer = 0;
+  private pendingGraphData: GraphData | null = null;
+  private nodeBasePositions = new Map<string, { x: number; y: number }>();
+
+  // ── Reveal state (Bruno Simon style) ──────────────────────────
+  private revealProgress = 1;                // 0 = all hidden, 1 = all revealed
+  private revealCenter = { x: 0, y: 0 };     // center of the node layout
+  private revealMaxDist = 1;                  // max distance from center among nodes
+  private nodeThreeObjects = new Map<string, THREE.Object3D>(); // ref to node 3D objects
+
+  // ── Ground clip plane for hiding sunken tables ────────────────
+  private groundClipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.2);
 
   // ── Debug params ──────────────────────────────────────────────
   private p = {
@@ -122,16 +155,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     collideRadius: 30,
     collideStrength: 1.0,
     collideIter: 5,
-    bloomStr: 0.45,
-    bloomRad: 0.35,
-    bloomThr: 0.35,
     vigInt: 0.65,
     vigSoft: 0.42,
     crossDensity: 0.06,
     crossSize: 0.012,
     crossFade: 500,
     crossOpacity: 0.85,
-    linkHeight: TABLE_DEPTH + 0.5,
+    linkHeight: TABLE_DEPTH * 0.6,  // below table top so tables occlude cables via depth test
     chargeStr: -40,
     alphaDecay: 0.02,
     velDecay: 0.3,
@@ -143,6 +173,10 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     headerEnd: '#7c3aed',
     crossColor: '#2a3f6a',
     groundBase: '#080c14',
+    cableColor: '#34d399',
+    cableSpeed: 1.2,
+    cableStripes: 6.0,
+    cableContrast: 0.38,
   };
 
   constructor(
@@ -159,6 +193,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.totalSteps = this.simulator.totalSteps;
     this.initThreeJS();
     this.initPostProcessing();
+    this.initCableUniforms();
     this.initGraph();
     this.initGUI();
     this.subscribeToSimulator();
@@ -194,7 +229,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.camera.position.set(0, this.p.camY, this.p.camZ);
     this.camera.lookAt(0, 0, 0);
 
-    // Renderer — high performance + antialias
+    // Renderer
     this.renderer = new THREE.WebGLRenderer({
       canvas: el,
       antialias: true,
@@ -207,6 +242,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.1;
+    // Enable local clipping planes (for hiding sunken tables)
+    this.renderer.localClippingEnabled = true;
 
     // ── Lights ────────────────────────────────────────────────
     const ambient = new THREE.AmbientLight(0x8090c0, 0.5);
@@ -255,7 +292,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   }
 
   // ================================================================
-  //  Post-processing
+  //  Post-processing (NO BLOOM)
   // ================================================================
 
   private initPostProcessing(): void {
@@ -264,15 +301,6 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-
-    // Bloom
-    this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(w, h),
-      this.p.bloomStr,
-      this.p.bloomRad,
-      this.p.bloomThr,
-    );
-    this.composer.addPass(this.bloomPass);
 
     // Vignette
     this.vignettePass = new ShaderPass({
@@ -286,6 +314,18 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     // Output pass (tone-mapping / color space)
     this.composer.addPass(new OutputPass());
+  }
+
+  // ================================================================
+  //  Cable shader uniforms (shared)
+  // ================================================================
+
+  private initCableUniforms(): void {
+    this.cableUniforms = THREE.UniformsUtils.clone(CableShader.uniforms);
+    this.cableUniforms['uColor'].value.set(this.p.cableColor);
+    this.cableUniforms['uSpeed'].value = this.p.cableSpeed;
+    this.cableUniforms['uStripeCount'].value = this.p.cableStripes;
+    this.cableUniforms['uStripeContrast'].value = this.p.cableContrast;
   }
 
   // ================================================================
@@ -308,7 +348,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       .warmupTicks(80)
       .cooldownTime(8000);
 
-    // Collision force — tighter layout
+    // Collision force
     (this.graph as any).d3Force(
       'collide',
       forceCollide()
@@ -323,12 +363,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         .iterations(this.p.collideIter),
     );
 
-    // Charge force — reduced to bring groups closer
+    // Charge force
     (this.graph as any)
       .d3Force('charge')
       ?.strength(this.p.chargeStr);
 
-    // Link distance — shorter to compact layout
+    // Link distance
     const linkForce = (this.graph as any).d3Force('link');
     if (linkForce) {
       linkForce.distance(45);
@@ -369,16 +409,24 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     });
     layout.add(this.p, 'linkHeight', 0, 8, 0.1);
 
-    // Bloom
-    const bloom = this.gui.addFolder('Bloom');
-    bloom.add(this.p, 'bloomStr', 0, 2, 0.01).onChange(() => {
-      this.bloomPass.strength = this.p.bloomStr;
+    // Cable
+    const cable = this.gui.addFolder('Cable');
+    cable.addColor(this.p, 'cableColor').name('Color').onChange(() => {
+      // Update ALL cable materials (each has its own uColor uniform)
+      this.graph.traverse((child: any) => {
+        if (child.isMesh && child.material && (child.material as any).__isCable) {
+          (child.material as THREE.ShaderMaterial).uniforms['uColor'].value.set(this.p.cableColor);
+        }
+      });
     });
-    bloom.add(this.p, 'bloomRad', 0, 2, 0.01).onChange(() => {
-      this.bloomPass.radius = this.p.bloomRad;
+    cable.add(this.p, 'cableSpeed', 0, 5, 0.1).name('Speed').onChange(() => {
+      this.cableUniforms['uSpeed'].value = this.p.cableSpeed;
     });
-    bloom.add(this.p, 'bloomThr', 0, 1, 0.01).onChange(() => {
-      this.bloomPass.threshold = this.p.bloomThr;
+    cable.add(this.p, 'cableStripes', 2, 60, 1).name('Stripes').onChange(() => {
+      this.cableUniforms['uStripeCount'].value = this.p.cableStripes;
+    });
+    cable.add(this.p, 'cableContrast', 0, 1, 0.01).name('Contrast').onChange(() => {
+      this.cableUniforms['uStripeContrast'].value = this.p.cableContrast;
     });
 
     // Vignette
@@ -443,7 +491,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         if (!q) return;
         this.currentQuery = q;
         const data = this.sqlParser.parseQueryToGraph(q);
-        this.applyGraphData(data);
+        this.handleStepTransition(data);
       }),
     );
     this.subs.add(
@@ -454,24 +502,261 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     );
   }
 
-  private applyGraphData(data: GraphData): void {
-    // Clear old materials refs when rebuilding
+  // ================================================================
+  //  Step transition — sink ↓ → new data → rise ↑
+  // ================================================================
+
+  private handleStepTransition(data: GraphData): void {
+    const currentData = (this.graph as any).graphData();
+    const hasExistingNodes = currentData?.nodes?.length > 0;
+
+    if (!hasExistingNodes || this.transitionPhase !== 'idle') {
+      this.pendingGraphData = data;
+      if (this.transitionPhase !== 'idle') {
+        return;  // already transitioning, just update pending
+      }
+      // First load — skip sink, go straight to reveal
+      this.applyGraphDataInternal(data);
+      this.startReveal();
+      return;
+    }
+
+    // Normal transition: start sinking current tables
+    this.pendingGraphData = data;
+    this.transitionPhase = 'sinking';
+    this.transitionTimer = 0;
+  }
+
+  private applyGraphDataInternal(data: GraphData): void {
     this.tableMaterials = { sides: [], edges: [], tops: [] };
     this.nodeColumnOffsets.clear();
     this.nodeDimensions.clear();
+    this.nodeBasePositions.clear();
+    this.nodeThreeObjects.clear();
 
     (this.graph as any).graphData({
       nodes: data.nodes,
       links: data.links,
     });
 
-    // Fit camera IMMEDIATELY after warmup ticks (positions are already set)
-    // Use requestAnimationFrame to ensure positions are applied
     requestAnimationFrame(() => {
-      this.fitCamera();
-      // Re-fit again shortly after for final stabilization
-      setTimeout(() => this.fitCamera(), 400);
+      const gData = (this.graph as any).graphData();
+      if (gData?.nodes) {
+        for (const n of gData.nodes) {
+          if (n.x != null && n.y != null) {
+            this.nodeBasePositions.set(n.id, { x: n.x, y: n.y });
+          }
+        }
+      }
+      this.computeCameraTarget();
     });
+  }
+
+
+  /**
+   * Start the Bruno Simon style reveal: compute center, max distance,
+   * and kick off the reveal progress animation.
+   */
+  private startReveal(): void {
+    // Compute layout center and max distance
+    const positions = Array.from(this.nodeBasePositions.values());
+    if (positions.length === 0) {
+      // Fallback: compute from graph data after a short delay
+      setTimeout(() => {
+        this.recomputeRevealCenter();
+        this.transitionPhase = 'revealing';
+        this.transitionTimer = 0;
+        this.revealProgress = 0;
+      }, 100);
+      return;
+    }
+
+    this.recomputeRevealCenter();
+    this.transitionPhase = 'revealing';
+    this.transitionTimer = 0;
+    this.revealProgress = 0;
+  }
+
+  private recomputeRevealCenter(): void {
+    const gData = (this.graph as any).graphData();
+    if (!gData?.nodes?.length) return;
+
+    let sumX = 0, sumY = 0, count = 0;
+    for (const n of gData.nodes) {
+      if (n.x != null && n.y != null) {
+        sumX += n.x;
+        sumY += n.y;
+        count++;
+      }
+    }
+    if (count === 0) return;
+
+    this.revealCenter = { x: sumX / count, y: sumY / count };
+
+    // Max distance from center
+    let maxDist = 1;
+    for (const n of gData.nodes) {
+      if (n.x != null && n.y != null) {
+        const dx = n.x - this.revealCenter.x;
+        const dy = n.y - this.revealCenter.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > maxDist) maxDist = d;
+      }
+    }
+    this.revealMaxDist = maxDist;
+  }
+
+  private computeCameraTarget(): void {
+    const data = (this.graph as any).graphData();
+    if (!data?.nodes?.length) return;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of data.nodes) {
+      if (n.x != null) { minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x); }
+      if (n.y != null) { minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y); }
+    }
+    if (!isFinite(minX)) return;
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    const spanX = maxX - minX + NODE_WIDTH * 2;
+    const spanY = maxY - minY + 40;
+    const span = Math.max(spanX, spanY, 80);
+    const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
+    const dist = span / (2 * Math.tan(fovRad / 2));
+
+    this.p.camY = dist * 0.8 + 30;
+    this.p.camZ = dist * 0.45 + 25;
+    this.cameraTarget.set(centerX, this.p.camY, this.p.camZ + centerY);
+    this.cameraLookTarget.set(centerX, 0, centerY);
+  }
+
+  /**
+   * Update the transition each frame.  Called from animate().
+   */
+  private updateTransition(dt: number): void {
+    if (this.transitionPhase === 'idle') return;
+
+    this.transitionTimer += dt;
+
+    if (this.transitionPhase === 'sinking') {
+      const t = Math.min(this.transitionTimer / TRANSITION_SINK_DURATION, 1);
+      const ease = this.easeInQuad(t);
+
+      // Move the entire graph group downward
+      this.graph.position.y = SINK_DEPTH * ease;
+
+      // Fade cables out
+      this.setAllLinksOpacity(1 - ease);
+
+      if (t >= 1) {
+        this.transitionPhase = 'pause';
+        this.transitionTimer = 0;
+      }
+    } else if (this.transitionPhase === 'pause') {
+      if (this.transitionTimer >= TRANSITION_PAUSE) {
+        // Reset graph position, apply new data
+        this.graph.position.y = 0;
+        this.graph.scale.set(1, 1, 1);
+
+        if (this.pendingGraphData) {
+          this.applyGraphDataInternal(this.pendingGraphData);
+          this.pendingGraphData = null;
+        }
+
+        // Start the reveal
+        this.startReveal();
+      }
+    } else if (this.transitionPhase === 'revealing') {
+      // Bruno Simon folio-2019 reveal:
+      // revealProgress goes 0 → 1 over REVEAL_DURATION.
+      // Each node's Z displacement depends on its distance to center.
+      // Nodes closer to center reveal first, distant ones later.
+      this.revealProgress = Math.min(this.transitionTimer / REVEAL_DURATION, 1);
+
+      this.updateRevealPerNode();
+
+      // Cables fade in during the second half of the reveal
+      const cableFadeT = Math.max(0, (this.revealProgress - 0.3) / 0.7);
+      this.setAllLinksOpacity(this.easeOutCubic(cableFadeT));
+
+      if (this.revealProgress >= 1) {
+        // Ensure all nodes at final position
+        this.finalizeReveal();
+        this.setAllLinksOpacity(1);
+        this.transitionPhase = 'idle';
+        this.transitionTimer = 0;
+      }
+    }
+  }
+
+  /**
+   * Bruno Simon folio-2019 style: per-node Z displacement based on distance to center.
+   * Nodes near the center appear first, distant ones later — creating a smooth wave.
+   */
+  private updateRevealPerNode(): void {
+    const gData = (this.graph as any).graphData();
+    if (!gData?.nodes) return;
+
+    for (const n of gData.nodes) {
+      if (n.x == null || n.y == null) continue;
+
+      const nodeObj = this.nodeThreeObjects.get(n.id);
+      if (!nodeObj) continue;
+
+      // Distance from this node to the layout center
+      const dx = n.x - this.revealCenter.x;
+      const dy = n.y - this.revealCenter.y;
+      const distToCenter = Math.sqrt(dx * dx + dy * dy);
+
+      // Per-node reveal progress: closer nodes have higher progress at any given time
+      // This is the key Bruno Simon formula:
+      //   nodeReveal = (globalProgress - distToCenter / scaleFactor) * multiplier
+      let nodeReveal = (this.revealProgress - distToCenter / REVEAL_WAVE_SCALE) * 5.0;
+      nodeReveal = Math.max(0, Math.min(1, nodeReveal));
+
+      // Ease the reveal for smoothness
+      nodeReveal = 1.0 - Math.pow(1.0 - nodeReveal, 3); // easeOutCubic per node
+
+      // At the very end, snap to final
+      if (this.revealProgress > 0.92) {
+        nodeReveal = 1.0;
+      }
+
+      // Displace in Z (graph space) = Y in world space (graph is rotated -PI/2 on X)
+      // Nodes start displaced below by REVEAL_Z_AMPLITUDE and move to 0
+      const zOffset = -REVEAL_Z_AMPLITUDE * (1.0 - nodeReveal);
+      nodeObj.position.z = zOffset;
+    }
+  }
+
+  /**
+   * Ensure all nodes are at their final position after reveal completes.
+   */
+  private finalizeReveal(): void {
+    for (const [, obj] of this.nodeThreeObjects) {
+      obj.position.z = 0;
+    }
+  }
+
+  private setAllLinksOpacity(opacity: number): void {
+    // Traverse link objects and set opacity
+    this.graph.traverse((child: any) => {
+      if (child.isMesh && child.material && (child.material as any).__isCable) {
+        (child.material as THREE.ShaderMaterial).uniforms['uOpacity'].value = opacity;
+      }
+    });
+  }
+
+  // ── Easing functions ──────────────────────────────────────────
+  private easeInQuad(t: number): number {
+    return t * t;
+  }
+  private easeOutCubic(t: number): number {
+    return 1 - Math.pow(1 - t, 3);
+  }
+  private easeOutQuart(t: number): number {
+    return 1 - Math.pow(1 - t, 4);
   }
 
   // ================================================================
@@ -489,7 +774,6 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     // Column Y-offsets (in local graph space, along Y axis)
     const offsets = new Map<string, number>();
     cols.forEach((col, i) => {
-      // header at +Y end, columns descend
       const y =
         totalH / 2 -
         HEADER_HEIGHT -
@@ -502,16 +786,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     // ── Box body ──────────────────────────────────────────────
     const bodyGeo = new THREE.BoxGeometry(w, totalH, TABLE_DEPTH);
 
-    // Material array: [+x, -x, +y, -y, +z (top), -z (bottom)]
     const sideMat = new THREE.MeshStandardMaterial({
       color: C.tableSide,
       roughness: 0.85,
       metalness: 0.05,
+      clippingPlanes: [this.groundClipPlane],
     });
     const bottomMat = new THREE.MeshStandardMaterial({
       color: 0x0a0e17,
       roughness: 1,
       metalness: 0,
+      clippingPlanes: [this.groundClipPlane],
     });
 
     // Top face gets the canvas texture
@@ -525,15 +810,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       map: tex,
       roughness: 0.7,
       metalness: 0.05,
+      clippingPlanes: [this.groundClipPlane],
     });
 
-    // Edge highlight material (Y sides)
+    // Edge highlight material
     const edgeMat = new THREE.MeshStandardMaterial({
       color: 0x2a2060,
       roughness: 0.6,
       metalness: 0.15,
       emissive: 0x1a1050,
       emissiveIntensity: 0.3,
+      clippingPlanes: [this.groundClipPlane],
     });
 
     // Store material refs for live GUI color updates
@@ -542,20 +829,26 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.tableMaterials.tops.push(topMat);
 
     const body = new THREE.Mesh(bodyGeo, [
-      sideMat, // +X
-      sideMat, // -X
-      edgeMat, // +Y  (header edge after rotation → front/back edge)
-      edgeMat, // -Y
-      topMat, // +Z  (top face → faces UP after graph rotation)
-      bottomMat, // -Z (bottom → faces down, on ground)
+      sideMat,   // +X
+      sideMat,   // -X
+      edgeMat,   // +Y
+      edgeMat,   // -Y
+      topMat,    // +Z  (top face)
+      bottomMat, // -Z  (bottom)
     ]);
-    body.position.z = TABLE_DEPTH / 2; // lift so bottom sits at z=0
+    body.position.z = TABLE_DEPTH / 2;
     body.castShadow = true;
     body.receiveShadow = true;
+    // Tables render FIRST — they write to depth buffer so cables are occluded behind them
+    body.renderOrder = 1;
     group.add(body);
 
     // Store node ref for texture rebuild
     (group as any).__nodeRef = node;
+    (group as any).__nodeId = node.id;
+
+    // Store ref for reveal animation (we modify THIS group's z, not the wrapper's)
+    this.nodeThreeObjects.set(node.id, group);
 
     return group;
   }
@@ -580,7 +873,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     ctx.fillStyle = '#141a2a';
     ctx.fillRect(0, 0, cW, cH);
 
-    // Header gradient — uses current GUI colors
+    // Header gradient
     const hH = Math.round(HEADER_HEIGHT * CANVAS_SCALE);
     const grad = ctx.createLinearGradient(0, 0, cW, 0);
     grad.addColorStop(0, this.p.headerStart);
@@ -629,18 +922,15 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     cols.forEach((col, i) => {
       const y = hH + padTop + i * rowH;
 
-      // Alternating row bg
       ctx.fillStyle = i % 2 === 0 ? C.rowEven : C.rowOdd;
       ctx.fillRect(0, y, cW, rowH);
 
-      // FK icon
       ctx.fillStyle = '#fbbf24';
       ctx.font = `${Math.round(colFont * 0.85)}px "Segoe UI", sans-serif`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText('\u25C6', 10, y + rowH / 2); // diamond marker
+      ctx.fillText('\u25C6', 10, y + rowH / 2);
 
-      // Column name
       ctx.fillStyle = C.textMuted;
       ctx.font = `${colFont}px "JetBrains Mono", Consolas, monospace`;
       ctx.textAlign = 'left';
@@ -657,9 +947,6 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     return canvas;
   }
 
-  /**
-   * Rebuild all table canvas textures when header colors change in GUI.
-   */
   private rebuildAllTableTextures(): void {
     const data = (this.graph as any).graphData();
     if (!data?.nodes?.length) return;
@@ -687,58 +974,77 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   }
 
   // ================================================================
-  //  Link (connector) rendering — ORTHOGONAL ROUTING
+  //  Link (connector) rendering — RIBBON MESH with CABLE SHADER
   // ================================================================
 
+  /**
+   * Creates a flat ribbon mesh for each link.
+   * The ribbon has UVs where U runs along the length (0→1) and
+   * V runs across the width (0→1). This drives the stripe shader.
+   * No arrow cone — just the cable.
+   */
   private createLinkLine(link: any): THREE.Object3D {
     const group = new THREE.Group();
+
+    // Create a flat ribbon geometry with enough segments for orthogonal bends
+    // We'll rebuild the positions each frame in updateLinkLine
+    const segCount = MAX_LINE_PTS - 1;
+    const geo = new THREE.PlaneGeometry(1, CABLE_WIDTH, segCount, 1);
+    // Mark that we'll override positions
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(
+      new Float32Array((segCount + 1) * 2 * 3), 3,
+    ));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(
+      new Float32Array((segCount + 1) * 2 * 2), 2,
+    ));
+    // We need an index for a proper strip
+    const indices: number[] = [];
+    for (let i = 0; i < segCount; i++) {
+      const a = i * 2;
+      const b = i * 2 + 1;
+      const c = (i + 1) * 2;
+      const d = (i + 1) * 2 + 1;
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+    geo.setIndex(indices);
+
     const color = this.getLinkColor(link);
-
-    // Core line
-    const coreGeo = new THREE.BufferGeometry();
-    coreGeo.setAttribute(
-      'position',
-      new THREE.Float32BufferAttribute(new Float32Array(MAX_LINE_PTS * 3), 3),
-    );
-    const coreMat = new THREE.LineBasicMaterial({
-      color,
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: this.cableUniforms['uTime'],
+        uColor: { value: new THREE.Color(color) },
+        uStripeCount: this.cableUniforms['uStripeCount'],
+        uStripeContrast: this.cableUniforms['uStripeContrast'],
+        uSpeed: this.cableUniforms['uSpeed'],
+        uOpacity: { value: 0.92 },
+      },
+      vertexShader: CableShader.vertexShader,
+      fragmentShader: CableShader.fragmentShader,
       transparent: true,
-      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,  // don't write depth — tables already wrote theirs
+      depthTest: true,     // DO test depth — cables hide behind tables
+      clippingPlanes: [this.groundClipPlane],
     });
-    group.add(new THREE.Line(coreGeo, coreMat));
+    (mat as any).__isCable = true;
 
-    // Arrow cone at target
-    const coneGeo = new THREE.ConeGeometry(1.2, 3.5, 6);
-    const coneMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity: 0.4,
-      roughness: 0.5,
-    });
-    const cone = new THREE.Mesh(coneGeo, coneMat);
-    cone.visible = false;
-    group.add(cone);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 10; // render AFTER tables (which are at 1) so depth test works
+    mesh.frustumCulled = false;
+    group.add(mesh);
+
+    (group as any).__cableMaterial = mat;
 
     return group;
   }
 
   /**
-   * Build an orthogonal (only horizontal/vertical segments) polyline
-   * between two column anchor points on two tables.
-   *
-   * Strategy (like Supabase / pgAdmin / dbdiagram):
-   *  1. Lines ALWAYS exit and enter from left or right side of a table
-   *     (never top/bottom). This matches how ER tools work.
-   *  2. The Y of the exit/entry point is at the specific column row.
-   *  3. Decide side: if target is to the right, exit right → enter left.
-   *     If target is to the left, exit left → enter right.
-   *     If they overlap on X, both exit on the same side (U-route).
-   *  4. Route: exit horizontal stub → vertical segment → entry horizontal stub.
-   *     All segments are strictly axis-aligned.
+   * Build an orthogonal polyline and update the ribbon mesh.
    */
   private buildOrthogonalPath(
-    sx: number, sy: number,  // source table center + column Y offset
-    tx: number, ty: number,  // target table center + column Y offset
+    sx: number, sy: number,
+    tx: number, ty: number,
     srcId: string, tgtId: string,
     z: number,
   ): THREE.Vector3[] {
@@ -748,9 +1054,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     const srcHW = srcDims.w / 2;
     const tgtHW = tgtDims.w / 2;
 
-    const dx = tx - sx; // positive = target is to the right
+    const dx = tx - sx;
 
-    // Source and target table edge X coordinates
     const srcRight = sx + srcHW;
     const srcLeft = sx - srcHW;
     const tgtRight = tx + tgtHW;
@@ -760,62 +1065,51 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     let entryX: number;
     let midX: number;
 
-    // Determine if tables overlap on X axis
     const xOverlap = srcRight > tgtLeft && tgtRight > srcLeft;
 
     if (!xOverlap && dx >= 0) {
-      // Target is to the right and no overlap → exit right, enter left
-      exitX = srcRight + EDGE_GAP;
-      entryX = tgtLeft - EDGE_GAP;
+      // Target is to the right — exit from source's right edge, enter target's left edge
+      exitX = srcRight;
+      entryX = tgtLeft;
       midX = (exitX + entryX) / 2;
     } else if (!xOverlap && dx < 0) {
-      // Target is to the left and no overlap → exit left, enter right
-      exitX = srcLeft - EDGE_GAP;
-      entryX = tgtRight + EDGE_GAP;
+      // Target is to the left — exit from source's left edge, enter target's right edge
+      exitX = srcLeft;
+      entryX = tgtRight;
       midX = (exitX + entryX) / 2;
     } else {
-      // Tables overlap on X (nearly stacked) → U-route around one side
-      // Pick the side that has the most room
+      // X overlap — route around the outside
       const rightEdge = Math.max(srcRight, tgtRight);
       const leftEdge = Math.min(srcLeft, tgtLeft);
+      const routeRight = rightEdge + 15;
+      const routeLeft = leftEdge - 15;
 
-      // Route to whichever side is shorter total distance
-      const routeRight = rightEdge + EDGE_GAP + 15;
-      const routeLeft = leftEdge - EDGE_GAP - 15;
+      // Pick the shorter route
+      const distRight = Math.abs(sx - routeRight) + Math.abs(tx - routeRight);
+      const distLeft = Math.abs(sx - routeLeft) + Math.abs(tx - routeLeft);
 
-      // Pick the side where both tables have their closest edges
-      if (Math.abs(dx) < 1) {
-        // Truly stacked — go right
-        exitX = srcRight + EDGE_GAP;
-        entryX = tgtRight + EDGE_GAP;
-        midX = routeRight;
-      } else if (dx >= 0) {
-        exitX = srcRight + EDGE_GAP;
-        entryX = tgtRight + EDGE_GAP;
+      if (distRight <= distLeft) {
+        exitX = srcRight;
+        entryX = tgtRight;
         midX = routeRight;
       } else {
-        exitX = srcLeft - EDGE_GAP;
-        entryX = tgtLeft - EDGE_GAP;
+        exitX = srcLeft;
+        entryX = tgtLeft;
         midX = routeLeft;
       }
     }
 
-    // Build the waypoints: horizontal stub → vertical → horizontal stub
-    // All segments are axis-aligned (orthogonal)
     const pts: THREE.Vector3[] = [];
 
     if (Math.abs(sy - ty) < 0.5 && !xOverlap) {
-      // Same row Y AND no overlap → straight horizontal line (no bends)
       pts.push(new THREE.Vector3(exitX, sy, z));
       pts.push(new THREE.Vector3(entryX, ty, z));
     } else if (xOverlap) {
-      // U-route: exit → go to midX → vertical → come back → entry
       pts.push(new THREE.Vector3(exitX, sy, z));
       pts.push(new THREE.Vector3(midX, sy, z));
       pts.push(new THREE.Vector3(midX, ty, z));
       pts.push(new THREE.Vector3(entryX, ty, z));
     } else {
-      // Z-route (standard): exit → midX at source Y → midX at target Y → entry
       pts.push(new THREE.Vector3(exitX, sy, z));
       pts.push(new THREE.Vector3(midX, sy, z));
       pts.push(new THREE.Vector3(midX, ty, z));
@@ -833,13 +1127,11 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     const { start, end } = coords;
     if (isNaN(start.x) || isNaN(end.x)) return true;
 
-    // ── Source / target positions ────────────────────────────
     let sy = start.y;
     let ty = end.y;
     const sx = start.x;
     const tx = end.x;
 
-    // Column Y-offsets
     const srcId =
       typeof link.source === 'object' ? link.source.id : link.source;
     const tgtId =
@@ -856,42 +1148,101 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     const z = this.p.linkHeight;
 
-    // ── Build orthogonal path ───────────────────────────────
     const waypoints = this.buildOrthogonalPath(sx, sy, tx, ty, srcId, tgtId, z);
 
-    // Fill position buffer
+    // ── Update ribbon mesh positions & UVs ────────────────────
+    const mesh = obj.children[0] as THREE.Mesh;
+    if (!mesh) return true;
+
     const totalPts = waypoints.length;
-    const flat = new Float32Array(MAX_LINE_PTS * 3); // zero-filled
-    for (let i = 0; i < totalPts; i++) {
-      flat[i * 3] = waypoints[i].x;
-      flat[i * 3 + 1] = waypoints[i].y;
-      flat[i * 3 + 2] = waypoints[i].z;
+    if (totalPts < 2) return true;
+
+    // Compute total path length for UV mapping
+    let totalLength = 0;
+    const segLengths: number[] = [0];
+    for (let i = 1; i < totalPts; i++) {
+      const d = waypoints[i].distanceTo(waypoints[i - 1]);
+      totalLength += d;
+      segLengths.push(totalLength);
+    }
+    if (totalLength < 0.01) totalLength = 1;
+
+    // Build ribbon vertices with proper handling of 90° corners.
+    // At each bend point we duplicate vertices: one pair using the incoming
+    // segment's perpendicular and one pair using the outgoing segment's
+    // perpendicular. This prevents twisting/folding at orthogonal bends.
+    const halfW = CABLE_WIDTH / 2;
+
+    // Pre-compute per-segment tangent and perpendicular
+    const tangents: THREE.Vector3[] = [];
+    const perps: THREE.Vector3[] = [];
+    for (let i = 0; i < totalPts - 1; i++) {
+      const t = new THREE.Vector3().subVectors(waypoints[i + 1], waypoints[i]).normalize();
+      tangents.push(t);
+      perps.push(new THREE.Vector3(-t.y, t.x, 0).multiplyScalar(halfW));
     }
 
-    const coreLine = obj.children[0] as THREE.Line;
-    const cone = obj.children[1] as THREE.Mesh;
+    // Build vertex list: at each inner waypoint that has a direction change
+    // we emit two vertex-pairs (one closing the old segment, one starting the new).
+    const positions: number[] = [];
+    const uvs: number[] = [];
 
-    const attr = coreLine.geometry.getAttribute('position') as THREE.BufferAttribute;
-    (attr.array as Float32Array).set(flat);
-    attr.needsUpdate = true;
-    coreLine.geometry.setDrawRange(0, totalPts);
-    coreLine.geometry.computeBoundingSphere();
+    const pushPair = (px: number, py: number, pz: number, perp: THREE.Vector3, u: number) => {
+      positions.push(px + perp.x, py + perp.y, pz);
+      positions.push(px - perp.x, py - perp.y, pz);
+      uvs.push(u, 0, u, 1);
+    };
 
-    // Arrow cone at end — point it in the direction of the last segment
-    if (totalPts >= 2) {
-      const last = waypoints[totalPts - 1];
-      const prev = waypoints[totalPts - 2];
-      cone.position.copy(last);
-      const dir = new THREE.Vector3()
-        .subVectors(last, prev)
-        .normalize();
-      const up = new THREE.Vector3(0, 1, 0);
-      const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
-      cone.setRotationFromQuaternion(quat);
-      cone.visible = true;
+    // First point — use raw world-space distance so stripe width is consistent
+    pushPair(waypoints[0].x, waypoints[0].y, waypoints[0].z, perps[0], segLengths[0] * CABLE_STRIPE_WORLD_SCALE);
+
+    // Inner points
+    for (let i = 1; i < totalPts - 1; i++) {
+      const u = segLengths[i] * CABLE_STRIPE_WORLD_SCALE;
+      const p = waypoints[i];
+      const prevPerp = perps[i - 1];
+      const nextPerp = perps[i];
+
+      // Check if direction changed (corner)
+      const dot = tangents[i - 1].dot(tangents[i]);
+      if (dot < 0.999) {
+        // Corner — emit closing pair with old perp, then opening pair with new perp
+        pushPair(p.x, p.y, p.z, prevPerp, u);
+        pushPair(p.x, p.y, p.z, nextPerp, u);
+      } else {
+        // Straight — single pair
+        pushPair(p.x, p.y, p.z, nextPerp, u);
+      }
     }
 
-    return true; // skip default positioning
+    // Last point
+    pushPair(
+      waypoints[totalPts - 1].x, waypoints[totalPts - 1].y, waypoints[totalPts - 1].z,
+      perps[perps.length - 1], segLengths[totalPts - 1] * CABLE_STRIPE_WORLD_SCALE,
+    );
+
+    const posArr = new Float32Array(positions);
+    const uvArr = new Float32Array(uvs);
+    const pairCount = posArr.length / 6; // number of vertex-pairs
+
+    // Build triangle-strip index
+    const newIndices: number[] = [];
+    for (let i = 0; i < pairCount - 1; i++) {
+      const a = i * 2;
+      const b = i * 2 + 1;
+      const c = (i + 1) * 2;
+      const d = (i + 1) * 2 + 1;
+      newIndices.push(a, c, b);
+      newIndices.push(b, c, d);
+    }
+
+    // Rebuild geometry fully (positions may change count at corners)
+    mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+    mesh.geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvArr, 2));
+    mesh.geometry.setIndex(newIndices);
+    mesh.geometry.computeBoundingSphere();
+
+    return true;
   }
 
   // ================================================================
@@ -918,42 +1269,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   }
 
   private fitCamera(): void {
-    const data = (this.graph as any).graphData();
-    if (!data?.nodes?.length) return;
-
-    let minX = Infinity,
-      maxX = -Infinity,
-      minY = Infinity,
-      maxY = -Infinity;
-
-    for (const n of data.nodes) {
-      if (n.x != null) {
-        minX = Math.min(minX, n.x);
-        maxX = Math.max(maxX, n.x);
-      }
-      if (n.y != null) {
-        minY = Math.min(minY, n.y);
-        maxY = Math.max(maxY, n.y);
-      }
-    }
-
-    if (!isFinite(minX)) return;
-
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-
-    const spanX = maxX - minX + NODE_WIDTH * 2;
-    const spanY = maxY - minY + 40;
-    const span = Math.max(spanX, spanY, 80);
-
-    const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
-    const dist = span / (2 * Math.tan(fovRad / 2));
-
-    // Set target for smooth lerp — no jump, starts immediately
-    this.p.camY = dist * 0.8 + 30;
-    this.p.camZ = dist * 0.45 + 25;
-    this.cameraTarget.set(centerX, this.p.camY, this.p.camZ + centerY);
-    this.cameraLookTarget.set(centerX, 0, centerY);
+    this.computeCameraTarget();
   }
 
   // ================================================================
@@ -969,17 +1285,32 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.groundUniforms['uTime'].value += dt;
     }
 
-    // ── Smooth camera lerp ──────────────────────────────────
-    const lerpFactor = 1.0 - Math.exp(-this.cameraLerpSpeed * dt);
+    // Update cable shader time
+    if (this.cableUniforms['uTime']) {
+      this.cableUniforms['uTime'].value += dt;
+    }
+
+    // Must tick the force graph FIRST (sets node positions)
+    // Only tick if NOT in reveal phase (freezes positions so cables don't flicker)
+    if (this.transitionPhase !== 'revealing') {
+      (this.graph as any).tickFrame();
+    }
+
+    // ── Step transitions (runs AFTER tickFrame so it can override positions) ──
+    this.updateTransition(dt);
+
+    // ── Smooth camera lerp ──────────────────────────────────────
+    // Use a smoothly decaying speed to avoid jerk when transition ends
+    const targetSpeed = this.transitionPhase !== 'idle' ? 0.4 : this.cameraLerpSpeed;
+    this.currentCameraSpeed += (targetSpeed - this.currentCameraSpeed) * Math.min(dt * 2.0, 1.0);
+    const lerpFactor = 1.0 - Math.exp(-this.currentCameraSpeed * dt);
     this.camera.position.lerp(this.cameraTarget, lerpFactor);
-    this.camera.lookAt(this.cameraLookTarget);
 
-    // MUST call tickFrame — THREE.Group has no geometry so onBeforeRender
-    // is never invoked by the renderer; without this call the d3-force
-    // simulation runs but node positions are never applied.
-    (this.graph as any).tickFrame();
+    // Smooth lookAt — lerp the lookAt target itself to prevent shaking
+    this.cameraLookCurrent.lerp(this.cameraLookTarget, lerpFactor);
+    this.camera.lookAt(this.cameraLookCurrent);
 
-    // Render via composer
+    // Render
     this.composer.render();
   }
 
@@ -997,7 +1328,6 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.composer.setSize(w, h);
-    this.bloomPass.setSize(w, h);
   }
 
   @HostListener('document:keydown', ['$event'])
