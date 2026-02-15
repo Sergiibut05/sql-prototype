@@ -63,13 +63,13 @@ const C = {
 
 // ── Transition ───────────────────────────────────────────────────
 const TRANSITION_SINK_DURATION = 1.8;    // seconds — tables sink below ground (slow & deliberate)
-const TRANSITION_PAUSE = 0.30;           // pause between sink and rise
+const SETTLING_DURATION = 0.4;           // seconds to let d3 simulation settle while hidden below ground
 const SINK_DEPTH = -80;                  // how far below ground tables sink
 
 // ── Reveal (Bruno Simon folio-2019 style) ────────────────────────
-const REVEAL_DURATION = 3.0;             // total reveal animation time (seconds)
-const REVEAL_Z_AMPLITUDE = 25.0;         // how far nodes are displaced below ground at start
-const REVEAL_WAVE_SCALE = 30.0;          // controls wave spread from center (higher = more staggered)
+const REVEAL_DURATION = 2.5;             // total reveal animation time (seconds)
+const REVEAL_Z_AMPLITUDE = 18.0;         // how far nodes are displaced below ground at start
+const REVEAL_WAVE_SCALE = 20.0;          // controls wave spread from center (higher = more staggered)
 
 @Component({
   selector: 'app-er-diagram',
@@ -133,7 +133,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   private cameraLookCurrent = new THREE.Vector3(0, 0, 0); // smoothed lookAt
 
   // ── Transition state ──────────────────────────────────────────
-  private transitionPhase: 'idle' | 'sinking' | 'pause' | 'revealing' = 'idle';
+  private transitionPhase: 'idle' | 'sinking' | 'settling' | 'revealing' = 'idle';
   private transitionTimer = 0;
   private pendingGraphData: GraphData | null = null;
   private nodeBasePositions = new Map<string, { x: number; y: number }>();
@@ -143,6 +143,9 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   private revealCenter = { x: 0, y: 0 };     // center of the node layout
   private revealMaxDist = 1;                  // max distance from center among nodes
   private nodeThreeObjects = new Map<string, THREE.Object3D>(); // ref to node 3D objects
+
+  // ── Link routing cache (prevents flicker during reveal) ───────
+  private linkRoutingCache = new Map<string, 'left' | 'right'>();
 
   // ── Ground clip plane for hiding sunken tables ────────────────
   private groundClipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.2);
@@ -159,7 +162,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     vigSoft: 0.42,
     crossDensity: 0.06,
     crossSize: 0.012,
-    crossFade: 500,
+    crossFade: 1400,
     crossOpacity: 0.85,
     linkHeight: TABLE_DEPTH * 0.6,  // below table top so tables occlude cables via depth test
     chargeStr: -40,
@@ -171,8 +174,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     tableEdge: '#2a2060',
     headerStart: '#4f46e5',
     headerEnd: '#7c3aed',
-    crossColor: '#2a3f6a',
-    groundBase: '#080c14',
+    crossColor: '#ffffff',
+    groundBase: '#0a0e1a',
     cableColor: '#34d399',
     cableSpeed: 1.2,
     cableStripes: 6.0,
@@ -246,13 +249,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.renderer.localClippingEnabled = true;
 
     // ── Lights ────────────────────────────────────────────────
-    const ambient = new THREE.AmbientLight(0x8090c0, 0.5);
+    const ambient = new THREE.AmbientLight(0x8090c0, 0.7);
     this.scene.add(ambient);
 
-    const hemi = new THREE.HemisphereLight(0x6070a0, 0x101828, 0.4);
+    const hemi = new THREE.HemisphereLight(0x6070a0, 0x101828, 0.55);
     this.scene.add(hemi);
 
-    const key = new THREE.DirectionalLight(0xc0c8ff, 1.2);
+    const key = new THREE.DirectionalLight(0xc0c8ff, 1.4);
     key.position.set(80, 200, 100);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
@@ -265,7 +268,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     key.shadow.bias = -0.0005;
     this.scene.add(key);
 
-    const fill = new THREE.DirectionalLight(0x7080c0, 0.4);
+    const fill = new THREE.DirectionalLight(0x7080c0, 0.5);
     fill.position.set(-60, 100, -80);
     this.scene.add(fill);
 
@@ -515,9 +518,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       if (this.transitionPhase !== 'idle') {
         return;  // already transitioning, just update pending
       }
-      // First load — skip sink, go straight to reveal
-      this.applyGraphDataInternal(data);
-      this.startReveal();
+      // First load — drop graph below ground, apply data, settle, then reveal
+      this.graph.position.y = SINK_DEPTH;
+      this.applyNewData(data);
+      this.pendingGraphData = null;
+      this.transitionPhase = 'settling';
+      this.transitionTimer = 0;
       return;
     }
 
@@ -527,51 +533,70 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.transitionTimer = 0;
   }
 
-  private applyGraphDataInternal(data: GraphData): void {
+  /**
+   * Apply new graph data. Does NOT change graph position or start reveal.
+   * The graph should already be at SINK_DEPTH (invisible) when this is called.
+   */
+  private applyNewData(data: GraphData): void {
     this.tableMaterials = { sides: [], edges: [], tops: [] };
     this.nodeColumnOffsets.clear();
     this.nodeDimensions.clear();
     this.nodeBasePositions.clear();
     this.nodeThreeObjects.clear();
+    this.linkRoutingCache.clear();
 
+    // graphData() runs warmupTicks(80) synchronously → d3 nodes get x,y.
+    // createTableNode callback stores refs in nodeThreeObjects.
+    // The graph group is at SINK_DEPTH so everything is clipped by the
+    // ground plane — completely invisible. tickFrame() in animate() will
+    // sync THREE wrapper positions from d3 data during the settling phase.
     (this.graph as any).graphData({
       nodes: data.nodes,
       links: data.links,
     });
-
-    requestAnimationFrame(() => {
-      const gData = (this.graph as any).graphData();
-      if (gData?.nodes) {
-        for (const n of gData.nodes) {
-          if (n.x != null && n.y != null) {
-            this.nodeBasePositions.set(n.id, { x: n.x, y: n.y });
-          }
-        }
-      }
-      this.computeCameraTarget();
-    });
   }
 
-
   /**
-   * Start the Bruno Simon style reveal: compute center, max distance,
-   * and kick off the reveal progress animation.
+   * Called at the end of the settling phase.
+   * Positions are now synced. Prepare nodes for reveal and bring the graph up.
    */
-  private startReveal(): void {
-    // Compute layout center and max distance
-    const positions = Array.from(this.nodeBasePositions.values());
-    if (positions.length === 0) {
-      // Fallback: compute from graph data after a short delay
-      setTimeout(() => {
-        this.recomputeRevealCenter();
-        this.transitionPhase = 'revealing';
-        this.transitionTimer = 0;
-        this.revealProgress = 0;
-      }, 100);
-      return;
+  private prepareReveal(): void {
+    // Freeze all node positions: set d3 fixed positions (fx/fy) and zero
+    // velocities so the simulation can't move nodes anymore. This prevents
+    // any jitter during the reveal and after it finishes (idle phase).
+    // Positions are automatically unfixed when graphData() is called next
+    // with fresh node objects.
+    const gData = (this.graph as any).graphData();
+    if (gData?.nodes) {
+      for (const n of gData.nodes) {
+        if (n.x != null && n.y != null) {
+          // Fix position — d3 will not move this node
+          n.fx = n.x;
+          n.fy = n.y;
+          // Zero velocity
+          n.vx = 0;
+          n.vy = 0;
+          this.nodeBasePositions.set(n.id, { x: n.x, y: n.y });
+        }
+      }
     }
-
+    this.computeCameraTarget();
     this.recomputeRevealCenter();
+
+    // Hide all node groups below ground via local z offset.
+    // When graph.position.y is reset to 0, nodes at z = -REVEAL_Z_AMPLITUDE
+    // will be at world y ≈ -18 (below clip plane at y = -0.2).
+    for (const [, obj] of this.nodeThreeObjects) {
+      obj.position.z = -REVEAL_Z_AMPLITUDE;
+    }
+    this.setAllLinksOpacity(0);
+
+    // NOW bring graph to ground level — nodes are hidden by z offset,
+    // cables are hidden by opacity = 0
+    this.graph.position.y = 0;
+    this.graph.scale.set(1, 1, 1);
+
+    // Start reveal
     this.transitionPhase = 'revealing';
     this.transitionTimer = 0;
     this.revealProgress = 0;
@@ -650,22 +675,24 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.setAllLinksOpacity(1 - ease);
 
       if (t >= 1) {
-        this.transitionPhase = 'pause';
-        this.transitionTimer = 0;
-      }
-    } else if (this.transitionPhase === 'pause') {
-      if (this.transitionTimer >= TRANSITION_PAUSE) {
-        // Reset graph position, apply new data
-        this.graph.position.y = 0;
-        this.graph.scale.set(1, 1, 1);
-
+        // Graph is now at SINK_DEPTH (invisible).
+        // Apply new data and start settling.
         if (this.pendingGraphData) {
-          this.applyGraphDataInternal(this.pendingGraphData);
+          this.applyNewData(this.pendingGraphData);
           this.pendingGraphData = null;
         }
+        this.transitionPhase = 'settling';
+        this.transitionTimer = 0;
+      }
+    } else if (this.transitionPhase === 'settling') {
+      // Graph stays at SINK_DEPTH — everything is below the ground clip plane.
+      // tickFrame() runs normally in animate() during this phase, so the
+      // d3 simulation positions nodes and THREE wrappers get synced.
+      this.graph.position.y = SINK_DEPTH;
 
-        // Start the reveal
-        this.startReveal();
+      if (this.transitionTimer >= SETTLING_DURATION) {
+        // Positions are settled — prepare for reveal
+        this.prepareReveal();
       }
     } else if (this.transitionPhase === 'revealing') {
       // Bruno Simon folio-2019 reveal:
@@ -676,8 +703,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
       this.updateRevealPerNode();
 
-      // Cables fade in during the second half of the reveal
-      const cableFadeT = Math.max(0, (this.revealProgress - 0.3) / 0.7);
+      // Cables fade in later, once most nodes are visible (avoids cables appearing alone)
+      const cableFadeT = Math.max(0, (this.revealProgress - 0.5) / 0.5);
       this.setAllLinksOpacity(this.easeOutCubic(cableFadeT));
 
       if (this.revealProgress >= 1) {
@@ -686,6 +713,9 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         this.setAllLinksOpacity(1);
         this.transitionPhase = 'idle';
         this.transitionTimer = 0;
+        // NOTE: Do NOT clear linkRoutingCache here — keep cached routing
+        // decisions so cables never change exit side during idle phase.
+        // Cache is cleared in applyNewData() when the next step arrives.
       }
     }
   }
@@ -698,6 +728,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     const gData = (this.graph as any).graphData();
     if (!gData?.nodes) return;
 
+    // Adaptive multiplier: for tighter layouts (small maxDist) we need a higher
+    // multiplier so the wave effect is still visible. For spread out layouts, lower.
+    const adaptiveMultiplier = this.revealMaxDist > 1
+      ? Math.max(3.0, Math.min(8.0, 80.0 / this.revealMaxDist))
+      : 5.0;
+
     for (const n of gData.nodes) {
       if (n.x == null || n.y == null) continue;
 
@@ -709,17 +745,20 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       const dy = n.y - this.revealCenter.y;
       const distToCenter = Math.sqrt(dx * dx + dy * dy);
 
+      // Normalize distance to 0..1 range using maxDist for consistent wave timing
+      const normalizedDist = this.revealMaxDist > 1 ? distToCenter / this.revealMaxDist : 0;
+
       // Per-node reveal progress: closer nodes have higher progress at any given time
       // This is the key Bruno Simon formula:
-      //   nodeReveal = (globalProgress - distToCenter / scaleFactor) * multiplier
-      let nodeReveal = (this.revealProgress - distToCenter / REVEAL_WAVE_SCALE) * 5.0;
+      //   nodeReveal = (globalProgress - normalizedDist * waveFraction) * multiplier
+      let nodeReveal = (this.revealProgress - normalizedDist * 0.4) * adaptiveMultiplier;
       nodeReveal = Math.max(0, Math.min(1, nodeReveal));
 
       // Ease the reveal for smoothness
       nodeReveal = 1.0 - Math.pow(1.0 - nodeReveal, 3); // easeOutCubic per node
 
       // At the very end, snap to final
-      if (this.revealProgress > 0.92) {
+      if (this.revealProgress > 0.95) {
         nodeReveal = 1.0;
       }
 
@@ -1065,17 +1104,37 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     let entryX: number;
     let midX: number;
 
-    const xOverlap = srcRight > tgtLeft && tgtRight > srcLeft;
+    // Use a small hysteresis margin to prevent routing flicker when nodes
+    // are near the overlap boundary. Also cache the routing decision during
+    // the reveal phase to avoid visible flickering.
+    const OVERLAP_MARGIN = 3;
+    const xOverlap = (srcRight - OVERLAP_MARGIN) > tgtLeft && (tgtRight - OVERLAP_MARGIN) > srcLeft;
+
+    const linkKey = srcId < tgtId ? `${srcId}:${tgtId}` : `${tgtId}:${srcId}`;
+    const cachedSide = this.linkRoutingCache.get(linkKey);
 
     if (!xOverlap && dx >= 0) {
       // Target is to the right — exit from source's right edge, enter target's left edge
-      exitX = srcRight;
-      entryX = tgtLeft;
+      if (cachedSide === 'left') {
+        // Reuse previous decision to avoid flicker
+        exitX = srcLeft;
+        entryX = tgtRight;
+      } else {
+        exitX = srcRight;
+        entryX = tgtLeft;
+        this.linkRoutingCache.set(linkKey, 'right');
+      }
       midX = (exitX + entryX) / 2;
     } else if (!xOverlap && dx < 0) {
       // Target is to the left — exit from source's left edge, enter target's right edge
-      exitX = srcLeft;
-      entryX = tgtRight;
+      if (cachedSide === 'right') {
+        exitX = srcRight;
+        entryX = tgtLeft;
+      } else {
+        exitX = srcLeft;
+        entryX = tgtRight;
+        this.linkRoutingCache.set(linkKey, 'left');
+      }
       midX = (exitX + entryX) / 2;
     } else {
       // X overlap — route around the outside
@@ -1084,18 +1143,25 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       const routeRight = rightEdge + 15;
       const routeLeft = leftEdge - 15;
 
-      // Pick the shorter route
+      // Pick the shorter route, or reuse cached side
       const distRight = Math.abs(sx - routeRight) + Math.abs(tx - routeRight);
       const distLeft = Math.abs(sx - routeLeft) + Math.abs(tx - routeLeft);
 
-      if (distRight <= distLeft) {
+      let useRight: boolean;
+      if (cachedSide === 'right') useRight = true;
+      else if (cachedSide === 'left') useRight = false;
+      else useRight = distRight <= distLeft;
+
+      if (useRight) {
         exitX = srcRight;
         entryX = tgtRight;
         midX = routeRight;
+        this.linkRoutingCache.set(linkKey, 'right');
       } else {
         exitX = srcLeft;
         entryX = tgtLeft;
         midX = routeLeft;
+        this.linkRoutingCache.set(linkKey, 'left');
       }
     }
 
@@ -1290,9 +1356,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.cableUniforms['uTime'].value += dt;
     }
 
-    // Must tick the force graph FIRST (sets node positions)
-    // Only tick if NOT in reveal phase (freezes positions so cables don't flicker)
-    if (this.transitionPhase !== 'revealing') {
+    // Must tick the force graph (sets node positions / syncs THREE wrappers).
+    // Run during 'idle' AND 'settling' phases. During settling, the graph
+    // is at SINK_DEPTH (invisible below ground clip plane), so the user
+    // sees nothing while the simulation positions nodes.
+    // Freeze during 'sinking' (old nodes animating down) and
+    // 'revealing' (prevent position jitter during reveal wave).
+    if (this.transitionPhase === 'idle' || this.transitionPhase === 'settling') {
       (this.graph as any).tickFrame();
     }
 
@@ -1300,14 +1370,16 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.updateTransition(dt);
 
     // ── Smooth camera lerp ──────────────────────────────────────
-    // Use a smoothly decaying speed to avoid jerk when transition ends
-    const targetSpeed = this.transitionPhase !== 'idle' ? 0.4 : this.cameraLerpSpeed;
-    this.currentCameraSpeed += (targetSpeed - this.currentCameraSpeed) * Math.min(dt * 2.0, 1.0);
+    // Use a smoothly decaying speed to avoid jerk when transition ends.
+    // Slower ramp (dt * 0.8) prevents sudden acceleration/deceleration.
+    const targetSpeed = this.transitionPhase !== 'idle' ? 0.5 : this.cameraLerpSpeed;
+    this.currentCameraSpeed += (targetSpeed - this.currentCameraSpeed) * Math.min(dt * 0.8, 1.0);
     const lerpFactor = 1.0 - Math.exp(-this.currentCameraSpeed * dt);
     this.camera.position.lerp(this.cameraTarget, lerpFactor);
 
-    // Smooth lookAt — lerp the lookAt target itself to prevent shaking
-    this.cameraLookCurrent.lerp(this.cameraLookTarget, lerpFactor);
+    // Smooth lookAt — use a separate, gentler lerp for look target to prevent shaking
+    const lookLerpFactor = 1.0 - Math.exp(-Math.min(this.currentCameraSpeed, 1.0) * dt);
+    this.cameraLookCurrent.lerp(this.cameraLookTarget, lookLerpFactor);
     this.camera.lookAt(this.cameraLookCurrent);
 
     // Render
