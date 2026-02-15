@@ -24,6 +24,7 @@ import { GraphNode, GraphData } from '../../shared/models/graph.model';
 import { GroundCrossesShader } from './shaders/ground-crosses-shader';
 import { VignetteShader } from './shaders/vignette-shader';
 import { CableShader } from './shaders/cable-shader';
+import { SqlglotParserService } from '../../core/services/sqlglot-parser.service';
 
 // ── Layout constants ──────────────────────────────────────────────
 const ROW_HEIGHT = 3.5;
@@ -111,6 +112,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   // ── Shader uniforms refs ──────────────────────────────────────
   private groundUniforms: Record<string, THREE.IUniform> = {};
   private vignettePass!: ShaderPass;
+  private bloomPass!: UnrealBloomPass;
 
   // ── Cable shader uniforms (shared across all cables) ──────────
   private cableUniforms: Record<string, THREE.IUniform> = {};
@@ -177,7 +179,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     crossFade: 1400,
     crossOpacity: 0.85,
     linkHeight: TABLE_DEPTH * 0.6,  // below table top so tables occlude cables via depth test
-    chargeStr: -40,
+    chargeStr: -15,
+    linkDist: 45,
     alphaDecay: 0.02,
     velDecay: 0.3,
     cameraLerpSpeed: 1.8,
@@ -192,10 +195,22 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     cableSpeed: 1.2,
     cableStripes: 6.0,
     cableContrast: 0.38,
+    // Bloom
+    bloomStrength: 0.35,
+    bloomRadius: 0.6,
+    bloomThreshold: 0.75,
+    // Particles
+    particleSize: 1.2,
+    particleOpacity: 0.6,
+    // Hover
+    hoverElevation: 3.0,
+    // Parser
+    useParser: 'node-sql-parser' as 'node-sql-parser' | 'sqlglot',
   };
 
   constructor(
     private sqlParser: SqlParserService,
+    private sqlglotParser: SqlglotParserService,
     public simulator: QuerySimulatorService,
     private ngZone: NgZone,
   ) { }
@@ -338,13 +353,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.composer.addPass(new RenderPass(this.scene, this.camera));
 
     // Bloom — subtle glow on emissive surfaces (headers, cables, edges)
-    const bloomPass = new UnrealBloomPass(
+    this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(w, h),
-      0.35,   // strength — subtle
-      0.6,    // radius
-      0.75,   // threshold — only bright emissive surfaces bloom
+      this.p.bloomStrength,
+      this.p.bloomRadius,
+      this.p.bloomThreshold,
     );
-    this.composer.addPass(bloomPass);
+    this.composer.addPass(this.bloomPass);
 
     // Vignette
     this.vignettePass = new ShaderPass({
@@ -476,7 +491,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     // Smooth elevation animation for each node
     for (const [nodeId, nodeObj] of this.nodeThreeObjects) {
-      const targetElev = nodeId === this.hoveredNodeId ? 3.0 : 0;
+      const targetElev = nodeId === this.hoveredNodeId ? this.p.hoverElevation : 0;
       const currentElev = this.hoverElevation.get(nodeId) || 0;
       const newElev = currentElev + (targetElev - currentElev) * Math.min(dt * 8, 1);
       this.hoverElevation.set(nodeId, newElev);
@@ -554,7 +569,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     // Link distance
     const linkForce = (this.graph as any).d3Force('link');
     if (linkForce) {
-      linkForce.distance(45);
+      linkForce.distance(this.p.linkDist);
     }
 
     // Rotate graph group so layout (XY) lies on ground (XZ)
@@ -586,8 +601,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     // Layout
     const layout = this.gui.addFolder('Layout');
     layout.add(this.p, 'collideRadius', 10, 80, 1);
-    layout.add(this.p, 'chargeStr', -200, 0, 1).onChange(() => {
+    layout.add(this.p, 'chargeStr', -200, 0, 1).name('Repulsion').onChange(() => {
       (this.graph as any).d3Force('charge')?.strength(this.p.chargeStr);
+      (this.graph as any).d3ReheatSimulation?.();
+    });
+    layout.add(this.p, 'linkDist', 10, 120, 1).name('Link Distance').onChange(() => {
+      const lf = (this.graph as any).d3Force('link');
+      if (lf) lf.distance(this.p.linkDist);
       (this.graph as any).d3ReheatSimulation?.();
     });
     layout.add(this.p, 'linkHeight', 0, 8, 0.1);
@@ -662,6 +682,41 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     // Start hidden
     this.gui.hide();
+
+    // Bloom
+    const bloom = this.gui.addFolder('Bloom');
+    bloom.add(this.p, 'bloomStrength', 0, 2, 0.01).name('Strength').onChange(() => {
+      this.bloomPass.strength = this.p.bloomStrength;
+    });
+    bloom.add(this.p, 'bloomRadius', 0, 2, 0.01).name('Radius').onChange(() => {
+      this.bloomPass.radius = this.p.bloomRadius;
+    });
+    bloom.add(this.p, 'bloomThreshold', 0, 2, 0.01).name('Threshold').onChange(() => {
+      this.bloomPass.threshold = this.p.bloomThreshold;
+    });
+
+    // Particles
+    const part = this.gui.addFolder('Particles');
+    part.add(this.p, 'particleSize', 0.1, 5, 0.1).name('Size').onChange(() => {
+      (this.particles.material as THREE.PointsMaterial).size = this.p.particleSize;
+    });
+    part.add(this.p, 'particleOpacity', 0, 1, 0.01).name('Opacity').onChange(() => {
+      (this.particles.material as THREE.PointsMaterial).opacity = this.p.particleOpacity;
+    });
+
+    // Hover
+    const hover = this.gui.addFolder('Hover');
+    hover.add(this.p, 'hoverElevation', 0, 10, 0.5).name('Elevation');
+
+    // Parser selection
+    const parser = this.gui.addFolder('Parser');
+    parser.add(this.p, 'useParser', ['node-sql-parser', 'sqlglot']).name('Engine').onChange(() => {
+      console.log(`Switched parser to: ${this.p.useParser}`);
+      // Re-parse current query with the new parser
+      if (this.currentQuery) {
+        this.parseAndTransition(this.currentQuery);
+      }
+    });
   }
 
   // ================================================================
@@ -673,8 +728,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.simulator.currentQuery$.subscribe((q) => {
         if (!q) return;
         this.currentQuery = q;
-        const data = this.sqlParser.parseQueryToGraph(q);
-        this.handleStepTransition(data);
+        this.parseAndTransition(q);
       }),
     );
     this.subs.add(
@@ -683,6 +737,28 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.subs.add(
       this.simulator.running$.subscribe((r) => (this.isRunning = r)),
     );
+  }
+
+  /**
+   * Parse SQL with the selected parser engine and trigger transition.
+   * sqlglot is async (HTTP call), node-sql-parser is sync.
+   */
+  private parseAndTransition(sql: string): void {
+    if (this.p.useParser === 'sqlglot') {
+      this.sqlglotParser.parseQuery(sql, 'postgres').subscribe((data) => {
+        if (data.nodes.length === 0) {
+          // Backend unreachable or parse failed — fallback
+          console.warn('sqlglot returned empty, falling back to node-sql-parser');
+          const fallback = this.sqlParser.parseQueryToGraph(sql);
+          this.handleStepTransition(fallback);
+        } else {
+          this.handleStepTransition(data);
+        }
+      });
+    } else {
+      const data = this.sqlParser.parseQueryToGraph(sql);
+      this.handleStepTransition(data);
+    }
   }
 
   // ================================================================
