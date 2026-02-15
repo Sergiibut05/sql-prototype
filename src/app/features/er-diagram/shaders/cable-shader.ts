@@ -9,6 +9,10 @@ import * as THREE from 'three';
  *
  * The base color and speed are configurable via uniforms so the GUI
  * can drive them at runtime.
+ *
+ * uPulse (0..1) drives an energy pulse wavefront along the cable
+ * when it first appears during reveal — a bright flash that travels
+ * from source to target.
  */
 export const CableShader = {
   uniforms: {
@@ -18,6 +22,7 @@ export const CableShader = {
     uStripeContrast: { value: 0.38 },                    // difference between light/dark bands
     uSpeed: { value: 1.2 },                               // scroll speed
     uOpacity: { value: 0.92 },
+    uPulse: { value: -1.0 },                              // -1 = no pulse, 0..1 = pulse position
   },
 
   vertexShader: /* glsl */ `
@@ -36,6 +41,7 @@ export const CableShader = {
     uniform float uStripeContrast;
     uniform float uSpeed;
     uniform float uOpacity;
+    uniform float uPulse;
 
     varying vec2 vUv;
 
@@ -56,6 +62,13 @@ export const CableShader = {
 
       vec3 col = uColor * brightness * (0.7 + 0.3 * edgeSoft);
       col += uColor * coreGlow;
+
+      // Energy pulse — bright wavefront traveling along the cable
+      if (uPulse >= 0.0) {
+        float pulseDist = abs(vUv.x - uPulse);
+        float pulseGlow = smoothstep(0.15, 0.0, pulseDist) * 2.0;
+        col += vec3(0.8, 0.95, 1.0) * pulseGlow * edgeSoft;
+      }
 
       // Alpha: solid center, fading edges for a cleaner look
       float alpha = uOpacity * smoothstep(1.0, 0.5, edgeDist);

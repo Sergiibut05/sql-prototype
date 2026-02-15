@@ -5,9 +5,9 @@ export const GroundCrossesShader = {
     uTime: { value: 0 },
     uCrossSize: { value: 0.012 },
     uCrossDensity: { value: 0.06 },
-    uCrossColor: { value: new THREE.Color(0x2a3f6a) },
-    uBaseColor: { value: new THREE.Color(0x080c14) },
-    uFadeDistance: { value: 500.0 },
+    uCrossColor: { value: new THREE.Color(0xffffff) },
+    uBaseColor: { value: new THREE.Color(0x0a0e1a) },
+    uFadeDistance: { value: 1400.0 },
     uCrossOpacity: { value: 0.85 },
   },
   vertexShader: /* glsl */ `

@@ -14,6 +14,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import GUI from 'lil-gui';
 import { Subscription } from 'rxjs';
 
@@ -118,6 +119,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   private subs = new Subscription();
   private textures: THREE.Texture[] = [];
 
+  // ── Particles ─────────────────────────────────────────────
+  private particles!: THREE.Points;
+  private particlePositions!: Float32Array;
+  private particleVelocities!: Float32Array;
+
+  // ── Hover state ──────────────────────────────────────────
+  private raycaster = new THREE.Raycaster();
+  private mouse = new THREE.Vector2(-999, -999);
+  private hoveredNodeId: string | null = null;
+  private hoverElevation = new Map<string, number>(); // current elevation per node
+
   // ── Stored materials for live color updates ──────────────────
   private tableMaterials: {
     sides: THREE.MeshStandardMaterial[];
@@ -197,10 +209,22 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.initThreeJS();
     this.initPostProcessing();
     this.initCableUniforms();
+    this.initParticles();
     this.initGraph();
     this.initGUI();
     this.subscribeToSimulator();
     this.simulator.start();
+
+    // Mouse tracking for hover
+    this.canvasRef.nativeElement.addEventListener('mousemove', (e: MouseEvent) => {
+      const rect = this.canvasRef.nativeElement.getBoundingClientRect();
+      this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    });
+    this.canvasRef.nativeElement.addEventListener('mouseleave', () => {
+      this.mouse.set(-999, -999);
+    });
+
     this.ngZone.runOutsideAngular(() => this.animate());
   }
 
@@ -280,6 +304,14 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.groundUniforms = THREE.UniformsUtils.clone(
       GroundCrossesShader.uniforms,
     );
+    // Sync initial values from this.p into cloned uniforms
+    this.groundUniforms['uCrossColor'].value.set(this.p.crossColor);
+    this.groundUniforms['uBaseColor'].value.set(this.p.groundBase);
+    this.groundUniforms['uFadeDistance'].value = this.p.crossFade;
+    this.groundUniforms['uCrossDensity'].value = this.p.crossDensity;
+    this.groundUniforms['uCrossSize'].value = this.p.crossSize;
+    this.groundUniforms['uCrossOpacity'].value = this.p.crossOpacity;
+
     const groundMat = new THREE.ShaderMaterial({
       uniforms: this.groundUniforms,
       vertexShader: GroundCrossesShader.vertexShader,
@@ -295,7 +327,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   }
 
   // ================================================================
-  //  Post-processing (NO BLOOM)
+  //  Post-processing with Bloom
   // ================================================================
 
   private initPostProcessing(): void {
@@ -304,6 +336,15 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+
+    // Bloom — subtle glow on emissive surfaces (headers, cables, edges)
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(w, h),
+      0.35,   // strength — subtle
+      0.6,    // radius
+      0.75,   // threshold — only bright emissive surfaces bloom
+    );
+    this.composer.addPass(bloomPass);
 
     // Vignette
     this.vignettePass = new ShaderPass({
@@ -329,6 +370,145 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     this.cableUniforms['uSpeed'].value = this.p.cableSpeed;
     this.cableUniforms['uStripeCount'].value = this.p.cableStripes;
     this.cableUniforms['uStripeContrast'].value = this.p.cableContrast;
+  }
+
+  // ================================================================
+  //  Floating particles (luminous dust)
+  // ================================================================
+
+  private initParticles(): void {
+    const COUNT = 800;
+    const SPREAD = 600;
+    const HEIGHT = 100;
+
+    this.particlePositions = new Float32Array(COUNT * 3);
+    this.particleVelocities = new Float32Array(COUNT * 3);
+
+    for (let i = 0; i < COUNT; i++) {
+      this.particlePositions[i * 3] = (Math.random() - 0.5) * SPREAD;
+      this.particlePositions[i * 3 + 1] = Math.random() * HEIGHT;
+      this.particlePositions[i * 3 + 2] = (Math.random() - 0.5) * SPREAD;
+      // Gentle upward drift + slight horizontal drift
+      this.particleVelocities[i * 3] = (Math.random() - 0.5) * 0.3;
+      this.particleVelocities[i * 3 + 1] = 0.2 + Math.random() * 0.4;
+      this.particleVelocities[i * 3 + 2] = (Math.random() - 0.5) * 0.3;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this.particlePositions, 3));
+
+    // Small glowing circle texture
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d')!;
+    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(180,200,255,1)');
+    grad.addColorStop(0.4, 'rgba(120,140,255,0.4)');
+    grad.addColorStop(1, 'rgba(60,80,200,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    const tex = new THREE.CanvasTexture(canvas);
+
+    const mat = new THREE.PointsMaterial({
+      size: 1.2,
+      map: tex,
+      transparent: true,
+      opacity: 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+
+    this.particles = new THREE.Points(geo, mat);
+    this.scene.add(this.particles);
+  }
+
+  private updateParticles(dt: number, time: number): void {
+    const count = this.particlePositions.length / 3;
+    for (let i = 0; i < count; i++) {
+      const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+      // Drift with velocity + sine wave for organic movement
+      this.particlePositions[ix] += this.particleVelocities[ix] * dt + Math.sin(time * 0.3 + i) * 0.02;
+      this.particlePositions[iy] += this.particleVelocities[iy] * dt;
+      this.particlePositions[iz] += this.particleVelocities[iz] * dt + Math.cos(time * 0.2 + i * 0.7) * 0.02;
+
+      // Recycle particles that float too high
+      if (this.particlePositions[iy] > 100) {
+        this.particlePositions[iy] = -5;
+        this.particlePositions[ix] = (Math.random() - 0.5) * 600;
+        this.particlePositions[iz] = (Math.random() - 0.5) * 600;
+      }
+    }
+    (this.particles.geometry.attributes['position'] as THREE.BufferAttribute).needsUpdate = true;
+  }
+
+  // ================================================================
+  //  Interactive hover — elevate table + highlight cables
+  // ================================================================
+
+  private updateHover(dt: number): void {
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    // Find which node (if any) the mouse is over
+    let newHoveredId: string | null = null;
+    const gData = (this.graph as any).graphData?.();
+    if (gData?.nodes?.length && this.transitionPhase === 'idle') {
+      // Raycast against the graph's children
+      const intersects = this.raycaster.intersectObjects(
+        (this.graph as THREE.Object3D).children, true
+      );
+      for (const hit of intersects) {
+        // Walk up the hierarchy to find a node group
+        let obj: THREE.Object3D | null = hit.object;
+        while (obj) {
+          if ((obj as any).__nodeId) {
+            newHoveredId = (obj as any).__nodeId;
+            break;
+          }
+          obj = obj.parent;
+        }
+        if (newHoveredId) break;
+      }
+    }
+
+    this.hoveredNodeId = newHoveredId;
+
+    // Smooth elevation animation for each node
+    for (const [nodeId, nodeObj] of this.nodeThreeObjects) {
+      const targetElev = nodeId === this.hoveredNodeId ? 3.0 : 0;
+      const currentElev = this.hoverElevation.get(nodeId) || 0;
+      const newElev = currentElev + (targetElev - currentElev) * Math.min(dt * 8, 1);
+      this.hoverElevation.set(nodeId, newElev);
+
+      // Only apply hover elevation in idle phase (don't interfere with reveal)
+      if (this.transitionPhase === 'idle') {
+        nodeObj.position.z = newElev;
+      }
+    }
+
+    // Highlight connected cables (dim non-connected ones)
+    if (this.hoveredNodeId && this.transitionPhase === 'idle') {
+      this.graph.traverse((child: any) => {
+        if (child.isMesh && child.material && (child.material as any).__isCable) {
+          const mat = child.material as THREE.ShaderMaterial;
+          const linkData = (child.parent as any)?.__data;
+          const isConnected = linkData && (
+            (linkData.source?.id || linkData.source) === this.hoveredNodeId ||
+            (linkData.target?.id || linkData.target) === this.hoveredNodeId
+          );
+          // Highlight connected cables, dim others
+          mat.uniforms['uOpacity'].value = isConnected ? 1.0 : 0.25;
+        }
+      });
+    } else if (this.transitionPhase === 'idle') {
+      // Reset all cables to full opacity when not hovering
+      this.graph.traverse((child: any) => {
+        if (child.isMesh && child.material && (child.material as any).__isCable) {
+          (child.material as THREE.ShaderMaterial).uniforms['uOpacity'].value = 0.92;
+        }
+      });
+    }
   }
 
   // ================================================================
@@ -707,10 +887,18 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       const cableFadeT = Math.max(0, (this.revealProgress - 0.5) / 0.5);
       this.setAllLinksOpacity(this.easeOutCubic(cableFadeT));
 
+      // Energy pulse: sweep a bright wavefront along cables as they appear
+      if (cableFadeT > 0 && cableFadeT < 1) {
+        this.setCablePulse(cableFadeT); // pulse position 0→1 as cables fade in
+      } else {
+        this.setCablePulse(-1); // no pulse
+      }
+
       if (this.revealProgress >= 1) {
         // Ensure all nodes at final position
         this.finalizeReveal();
         this.setAllLinksOpacity(1);
+        this.setCablePulse(-1); // disable pulse
         this.transitionPhase = 'idle';
         this.transitionTimer = 0;
         // NOTE: Do NOT clear linkRoutingCache here — keep cached routing
@@ -787,6 +975,17 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     });
   }
 
+  private setCablePulse(pulse: number): void {
+    this.graph.traverse((child: any) => {
+      if (child.isMesh && child.material && (child.material as any).__isCable) {
+        const mat = child.material as THREE.ShaderMaterial;
+        if (mat.uniforms['uPulse']) {
+          mat.uniforms['uPulse'].value = pulse;
+        }
+      }
+    });
+  }
+
   // ── Easing functions ──────────────────────────────────────────
   private easeInQuad(t: number): number {
     return t * t;
@@ -852,13 +1051,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       clippingPlanes: [this.groundClipPlane],
     });
 
-    // Edge highlight material
+    // Edge highlight material — boosted emissive for bloom glow
     const edgeMat = new THREE.MeshStandardMaterial({
-      color: 0x2a2060,
-      roughness: 0.6,
-      metalness: 0.15,
-      emissive: 0x1a1050,
-      emissiveIntensity: 0.3,
+      color: 0x3a2880,
+      roughness: 0.5,
+      metalness: 0.2,
+      emissive: 0x4f46e5,
+      emissiveIntensity: 0.6,
       clippingPlanes: [this.groundClipPlane],
     });
 
@@ -1381,6 +1580,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     const lookLerpFactor = 1.0 - Math.exp(-Math.min(this.currentCameraSpeed, 1.0) * dt);
     this.cameraLookCurrent.lerp(this.cameraLookTarget, lookLerpFactor);
     this.camera.lookAt(this.cameraLookCurrent);
+
+    // ── Particles ──────────────────────────────────────────────
+    const elapsed = this.clock.elapsedTime;
+    this.updateParticles(dt, elapsed);
+
+    // ── Hover effects ──────────────────────────────────────────
+    this.updateHover(dt);
 
     // Render
     this.composer.render();
