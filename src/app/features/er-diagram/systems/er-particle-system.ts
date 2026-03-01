@@ -32,15 +32,15 @@ export class ErParticleSystem {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
 
-        // Small glowing circle texture
+        // Small glowing circle texture (Fuego Fatuo / Willow-wisp teal-cyan)
         const canvas = document.createElement('canvas');
         canvas.width = 32;
         canvas.height = 32;
         const ctx = canvas.getContext('2d')!;
         const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-        grad.addColorStop(0, 'rgba(180,200,255,1)');
-        grad.addColorStop(0.4, 'rgba(120,140,255,0.4)');
-        grad.addColorStop(1, 'rgba(60,80,200,0)');
+        grad.addColorStop(0, 'rgba(165, 243, 255, 1)');    // Diamond-blue core
+        grad.addColorStop(0.4, 'rgba(45, 120, 255, 0.5)'); // Electric blue glow
+        grad.addColorStop(1, 'rgba(15, 30, 150, 0)');      // Deep blue fade
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, 32, 32);
 
