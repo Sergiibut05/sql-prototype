@@ -12,7 +12,7 @@ export const EDGE_GAP = 0;   // no gap — cables connect flush to table edges
 export const EDGE_CLEARANCE = 5;
 
 // ── Cable geometry ───────────────────────────────────────────────
-export const CABLE_WIDTH = 0.5;
+export const CABLE_WIDTH = 1.1; // Increased width for a wider glow halo
 export const CABLE_STRIPE_WORLD_SCALE = 0.08; // stripe period in world units (consistent across cables)
 
 // ── Colors ────────────────────────────────────────────────────────

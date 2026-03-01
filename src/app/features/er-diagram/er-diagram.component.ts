@@ -209,15 +209,41 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
         if (data.nodes.length === 0) {
           console.warn('sqlglot returned empty, falling back to node-sql-parser');
           const fallback = this.sqlParser.parseQueryToGraph(sql);
+          this.processKeys(fallback);
           this.transitionMgr.handleStepTransition(fallback);
         } else {
+          this.processKeys(data);
           this.transitionMgr.handleStepTransition(data);
         }
       });
     } else {
       const data = this.sqlParser.parseQueryToGraph(sql);
+      this.processKeys(data);
       this.transitionMgr.handleStepTransition(data);
     }
+  }
+
+  /**
+   * Annotate nodes with precisely which columns are used as keys (in links)
+   * so the renderer doesn't have to guess based on column names like 'id' or 'fk'.
+   */
+  private processKeys(data: GraphData): void {
+    const keyMap = new Map<string, Set<string>>();
+    data.links.forEach(l => {
+      const src = typeof l.source === 'string' ? l.source : l.source.id;
+      const tgt = typeof l.target === 'string' ? l.target : l.target.id;
+
+      // Only annotate the target (destination) side of the relationship as the foreign key
+      if (tgt && l.targetColumn) {
+        if (!keyMap.has(tgt)) keyMap.set(tgt, new Set());
+        keyMap.get(tgt)!.add(l.targetColumn);
+      }
+    });
+
+    data.nodes.forEach(n => {
+      const keys = keyMap.get(n.id);
+      (n as any).keyColumns = keys ? Array.from(keys) : [];
+    });
   }
 
   // ================================================================
@@ -243,8 +269,8 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     // State machine (sink → settle → reveal)
     this.transitionMgr.update(dt);
 
-    // Smooth camera lerp
-    this.cameraManager.update(dt, phase);
+    // Smooth camera lerp and cinematic drifting
+    this.cameraManager.update(dt, elapsed, phase);
 
     // Particles
     this.particles.update(dt, elapsed);

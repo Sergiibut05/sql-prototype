@@ -149,50 +149,47 @@ export class ErLinkRenderer {
         }
         if (totalLength < 0.01) totalLength = 1;
 
-        // Pre-compute per-segment tangents and perpendiculars
+        // Pre-compute continuous perpendiculars for smooth ribbon joints
         const halfW = CABLE_WIDTH / 2;
-        const tangents: THREE.Vector3[] = [];
         const perps: THREE.Vector3[] = [];
-        for (let i = 0; i < totalPts - 1; i++) {
-            const t = new THREE.Vector3().subVectors(waypoints[i + 1], waypoints[i]).normalize();
-            tangents.push(t);
-            perps.push(new THREE.Vector3(-t.y, t.x, 0).multiplyScalar(halfW));
+
+        for (let i = 0; i < totalPts; i++) {
+            let dir: THREE.Vector3;
+            if (i === 0) {
+                dir = new THREE.Vector3().subVectors(waypoints[1], waypoints[0]).normalize();
+            } else if (i === totalPts - 1) {
+                dir = new THREE.Vector3().subVectors(waypoints[totalPts - 1], waypoints[totalPts - 2]).normalize();
+            } else {
+                // Average of incoming and outgoing tangents for a perfect miter joint
+                const t1 = new THREE.Vector3().subVectors(waypoints[i], waypoints[i - 1]).normalize();
+                const t2 = new THREE.Vector3().subVectors(waypoints[i + 1], waypoints[i]).normalize();
+                dir = new THREE.Vector3().addVectors(t1, t2).normalize();
+                if (dir.lengthSq() < 0.001) dir = t1; // fallback
+            }
+
+            // To maintain constant width through a miter joint, we divide by the dot product
+            // but for gentle bezier curves, a standard normalised perpendicular is perfect.
+            perps.push(new THREE.Vector3(-dir.y, dir.x, 0).normalize().multiplyScalar(halfW));
         }
 
-        // Build ribbon vertices — at 90° corners duplicate vertex-pairs to avoid twisting
+        // Build ribbon vertices — single unified strip
         const positions: number[] = [];
         const uvs: number[] = [];
+        const progresses: number[] = []; // Distance 0..1 along the cable
 
-        const pushPair = (px: number, py: number, pz: number, perp: THREE.Vector3, u: number) => {
+        const pushPair = (px: number, py: number, pz: number, perp: THREE.Vector3, u: number, progress: number) => {
             positions.push(px + perp.x, py + perp.y, pz);
             positions.push(px - perp.x, py - perp.y, pz);
             uvs.push(u, 0, u, 1);
+            progresses.push(progress, progress);
         };
 
-        // First point (use world-space distance so stripe width is consistent across cables)
-        pushPair(waypoints[0].x, waypoints[0].y, waypoints[0].z, perps[0],
-            segLengths[0] * CABLE_STRIPE_WORLD_SCALE);
-
-        // Inner points
-        for (let i = 1; i < totalPts - 1; i++) {
+        for (let i = 0; i < totalPts; i++) {
             const u = segLengths[i] * CABLE_STRIPE_WORLD_SCALE;
+            const progress = totalLength > 0 ? (segLengths[i] / totalLength) : 0;
             const p = waypoints[i];
-            const dot = tangents[i - 1].dot(tangents[i]);
-            if (dot < 0.999) {
-                // Corner — close old segment, open new segment
-                pushPair(p.x, p.y, p.z, perps[i - 1], u);
-                pushPair(p.x, p.y, p.z, perps[i], u);
-            } else {
-                pushPair(p.x, p.y, p.z, perps[i], u);
-            }
+            pushPair(p.x, p.y, p.z, perps[i], u, progress);
         }
-
-        // Last point
-        pushPair(
-            waypoints[totalPts - 1].x, waypoints[totalPts - 1].y, waypoints[totalPts - 1].z,
-            perps[perps.length - 1],
-            segLengths[totalPts - 1] * CABLE_STRIPE_WORLD_SCALE,
-        );
 
         const posArr = new Float32Array(positions);
         const uvArr = new Float32Array(uvs);
@@ -207,6 +204,7 @@ export class ErLinkRenderer {
 
         mesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
         mesh.geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvArr, 2));
+        mesh.geometry.setAttribute('aProgress', new THREE.Float32BufferAttribute(new Float32Array(progresses), 1));
         mesh.geometry.setIndex(newIndices);
         mesh.geometry.computeBoundingSphere();
         return true;

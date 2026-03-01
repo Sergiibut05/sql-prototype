@@ -3,6 +3,7 @@ export interface GraphNode {
   name: string;
   val?: number;
   columns?: string[];
+  keyColumns?: string[];
   schema?: string;
   isSubquery?: boolean;
   // Runtime positions set by force layout

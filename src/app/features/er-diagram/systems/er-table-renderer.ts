@@ -71,10 +71,10 @@ export class ErTableRenderer {
 
         const topMat = new THREE.MeshPhysicalMaterial({
             map: tex,
-            roughness: 0.25,
+            roughness: 0.35,          // Increased roughness so light spreads out
             metalness: 0.0,
-            clearcoat: 0.45,
-            clearcoatRoughness: 0.05,
+            clearcoat: 0.10,          // Reduced so it doesn't wash out text
+            clearcoatRoughness: 0.40, // Softer reflection
             clippingPlanes: [this.groundClipPlane],
         }) as unknown as THREE.MeshStandardMaterial;
 
@@ -139,7 +139,7 @@ export class ErTableRenderer {
 
         // ── Glass gloss — subtle top reflection on header ──────────────────
         const gloss = ctx.createLinearGradient(0, 0, 0, hH * 0.55);
-        gloss.addColorStop(0, 'rgba(180,210,255,0.18)');
+        gloss.addColorStop(0, 'rgba(180,210,255,0.06)'); // drastically reduced visual noise
         gloss.addColorStop(1, 'rgba(180,210,255,0)');
         ctx.fillStyle = gloss;
         ctx.fillRect(0, 0, cW, hH * 0.55);
@@ -185,12 +185,35 @@ export class ErTableRenderer {
             ctx.fillStyle = i % 2 === 0 ? C.rowEven : C.rowOdd;
             ctx.fillRect(0, y, cW, rowH);
 
-            // Sky-blue column icon (matches cable/edge palette)
-            ctx.fillStyle = '#38bdf8';
-            ctx.font = `${Math.round(colFont * 0.85)}px "Segoe UI", sans-serif`;
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'middle';
-            ctx.fillText('\u25C6', 10, y + rowH / 2);
+            // Only treat as key if it actually participates in a graph link (Foreign Key / Primary Key acting as relationship)
+            const isKey = node.keyColumns?.includes(col);
+
+            if (isKey) {
+                // Purple/Blue for actual rel keys exactly as requested
+                ctx.fillStyle = '#a78bfa'; // violet-400
+                const kx = 14;
+                const ky = y + rowH / 2;
+                ctx.save();
+                ctx.translate(kx, ky);
+                ctx.beginPath();
+                ctx.arc(-4, 0, 3, 0, Math.PI * 2); // Head
+                ctx.rect(-1, -1, 7, 2);            // Shaft
+                ctx.rect(3, 1, 1.5, 2.5);          // Tooth 1
+                ctx.rect(5.5, 1, 1.5, 2.5);        // Tooth 2
+                ctx.fill();
+                // Cutout hole
+                ctx.fillStyle = i % 2 === 0 ? C.rowEven : C.rowOdd;
+                ctx.beginPath();
+                ctx.arc(-4, 0, 1.2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            } else {
+                ctx.fillStyle = '#38bdf8';
+                ctx.font = `${Math.round(colFont * 0.85)}px "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('\u25C6', 14, y + rowH / 2); // default diamond
+            }
 
             ctx.fillStyle = C.textMuted;
             ctx.font = `${colFont}px "JetBrains Mono", Consolas, monospace`;

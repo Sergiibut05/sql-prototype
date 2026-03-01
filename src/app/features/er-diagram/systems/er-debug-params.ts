@@ -72,7 +72,7 @@ export function createDefaultParams(): ErDebugParams {
         crossColor: '#ffffff',
         groundBase: '#0a0e1a',
         cableColor: '#38bdf8',   // sky blue (matches new cable/link palette)
-        cableSpeed: 1.2,
+        cableSpeed: 5.0,
         cableStripes: 6.0,
         cableContrast: 0.38,
         bloomStrength: 0.35,

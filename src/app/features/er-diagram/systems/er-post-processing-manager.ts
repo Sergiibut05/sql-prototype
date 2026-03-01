@@ -24,7 +24,15 @@ export class ErPostProcessingManager {
         const w = renderer.domElement.width;
         const h = renderer.domElement.height;
 
-        this.composer = new EffectComposer(renderer);
+        // Create a multi-sampled render target to keep MSAA (Anti-Aliasing) 
+        // when using the EffectComposer, preventing jagged diagonal cable lines.
+        const renderTarget = new THREE.WebGLRenderTarget(w, h, {
+            samples: Math.min(renderer.capabilities.maxSamples, 4), // 4x MSAA is perfect for most devices
+            type: THREE.HalfFloatType,
+            format: THREE.RGBAFormat,
+        });
+
+        this.composer = new EffectComposer(renderer, renderTarget);
         this.composer.addPass(new RenderPass(scene, camera));
 
         // Bloom — subtle glow on emissive surfaces (headers, cables, edges)

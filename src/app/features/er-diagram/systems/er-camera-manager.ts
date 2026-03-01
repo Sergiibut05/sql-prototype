@@ -8,6 +8,7 @@ import { ErDebugParams } from './er-debug-params';
  * each frame, and computing an auto-fit camera position from graph bounds.
  */
 export class ErCameraManager {
+    readonly baseCameraTarget = new THREE.Vector3(0, 200, 160);
     readonly cameraTarget = new THREE.Vector3(0, 200, 160);
     readonly cameraLookTarget = new THREE.Vector3(0, 0, 0);
     readonly cameraLookCurrent = new THREE.Vector3(0, 0, 0);
@@ -24,9 +25,20 @@ export class ErCameraManager {
      * Advance camera lerp each frame.
      * @param phase Current transition phase — camera moves slower during transitions.
      */
-    update(dt: number, phase: string): void {
+    update(dt: number, elapsed: number, phase: string): void {
         const targetSpeed = phase !== 'idle' ? 0.5 : this.cameraLerpSpeed;
         this.currentCameraSpeed += (targetSpeed - this.currentCameraSpeed) * Math.min(dt * 0.8, 1.0);
+
+        // ── Cinematic slow orbit ─────────────────────────────────────────────
+        // Adds continuous, smooth floating movement around the diagram.
+        const rX = 35;  // Horizontal drift amplitude
+        const rZ = 15;  // Depth drift amplitude
+        const rY = 5;   // Vertical bobbing amplitude
+        const s = 0.12; // Orbit speed
+
+        this.cameraTarget.x = this.baseCameraTarget.x + Math.sin(elapsed * s) * rX;
+        this.cameraTarget.z = this.baseCameraTarget.z + Math.cos(elapsed * s * 0.8) * rZ;
+        this.cameraTarget.y = this.baseCameraTarget.y + Math.sin(elapsed * s * 0.5) * rY;
 
         const lerpFactor = 1.0 - Math.exp(-this.currentCameraSpeed * dt);
         this.camera.position.lerp(this.cameraTarget, lerpFactor);
@@ -38,7 +50,7 @@ export class ErCameraManager {
 
     /** Set camera target from manual GUI sliders. */
     setCameraTargetFromParams(): void {
-        this.cameraTarget.set(0, this.p.camY, this.p.camZ);
+        this.baseCameraTarget.set(0, this.p.camY, this.p.camZ);
     }
 
     /**
@@ -60,13 +72,15 @@ export class ErCameraManager {
         const centerY = (minY + maxY) / 2;
         const spanX = maxX - minX + NODE_WIDTH * 2;
         const spanY = maxY - minY + 40;
-        const span = Math.max(spanX, spanY, 80);
+        // Boost minimum span slightly to prevent extreme wide-angle distortion, but keep it close
+        const span = Math.max(spanX, spanY, 100);
         const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
         const dist = span / (2 * Math.tan(fovRad / 2));
 
-        this.p.camY = dist * 0.8 + 30;
-        this.p.camZ = dist * 0.45 + 25;
-        this.cameraTarget.set(centerX, this.p.camY, this.p.camZ + centerY);
+        // Flatter camera angle emphasizes 3D thickness, but pulled in closer
+        this.p.camY = dist * 0.70 + 15;
+        this.p.camZ = dist * 0.45 + 15;
+        this.baseCameraTarget.set(centerX, this.p.camY, this.p.camZ + centerY);
         this.cameraLookTarget.set(centerX, 0, centerY);
     }
 }

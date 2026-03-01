@@ -26,10 +26,13 @@ export const CableShader = {
   },
 
   vertexShader: /* glsl */ `
+    attribute float aProgress;
     varying vec2 vUv;
+    varying float vProgress;
 
     void main() {
       vUv = uv;
+      vProgress = aProgress;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
   `,
@@ -44,36 +47,46 @@ export const CableShader = {
     uniform float uPulse;
 
     varying vec2 vUv;
+    varying float vProgress; // 0.0 at source, 1.0 at target
 
     void main() {
-      // Stripe wave — smooth sinusoidal bands scrolling along the cable length
-      float phase = (vUv.x * uStripeCount - uTime * uSpeed) * 6.28318;
-      float wave = sin(phase);
+      // Normalised distance from center (0 = middle, 1 = edge)
+      float dist = abs(vUv.y - 0.5) * 2.0;
+      
+      // 1. Core Line: Bright inner core
+      float coreThickness = 0.25;
+      float coreMask = smoothstep(coreThickness, 0.0, dist);
+      
+      // 2. Aura: Outer smooth glow (anti-aliased fade)
+      float auraMask = smoothstep(1.0, 0.0, dist);
+      
+      // -- Coloring --
+      vec3 coreColor = mix(uColor, vec3(1.0), 0.7); // Bright white-ish center
+      vec3 glowColor = uColor * 0.8;                // Base cable color
+      
+      vec3 finalCol = glowColor * auraMask;
+      finalCol += coreColor * coreMask;
+      
+      // 3. Subtle Flowing Energy
+      // Uses sine wave instead of sharp fract so there are no cuts or sudden changes
+      float phase = sin(vUv.x * uStripeCount * 0.5 - uTime * uSpeed) * 0.5 + 0.5;
+      finalCol += mix(uColor, vec3(1.0), 0.5) * phase * auraMask * 0.8;
 
-      // Smooth brightness modulation between 1-contrast and 1+contrast
-      float brightness = 1.0 + wave * uStripeContrast;
+      // 4. Target Connection Glow
+      // Exponential glow that gets extremely bright precisely at the endpoint (vProgress = 1.0)
+      float targetGlow = smoothstep(0.9, 1.0, vProgress) * exp((vProgress - 1.0) * 15.0);
+      finalCol += vec3(0.95, 0.98, 1.0) * targetGlow * 3.0 * auraMask;
 
-      // Edge softness — slightly brighter centre, softer edges
-      float edgeDist = abs(vUv.y - 0.5) * 2.0;  // 0 at center, 1 at edges
-      float edgeSoft = smoothstep(1.0, 0.3, edgeDist);
-
-      // Core glow — subtle bright line at the very center
-      float coreGlow = smoothstep(0.35, 0.0, edgeDist) * 0.2;
-
-      vec3 col = uColor * brightness * (0.7 + 0.3 * edgeSoft);
-      col += uColor * coreGlow;
-
-      // Energy pulse — bright wavefront traveling along the cable
+      // 5. Connection Pulse (Static burst traveling the whole length during load)
       if (uPulse >= 0.0) {
         float pulseDist = abs(vUv.x - uPulse);
-        float pulseGlow = smoothstep(0.15, 0.0, pulseDist) * 2.0;
-        col += vec3(0.8, 0.95, 1.0) * pulseGlow * edgeSoft;
+        float pulseGlow = exp(-pulseDist * 3.0);
+        finalCol += vec3(1.0) * pulseGlow * auraMask * 1.5;
       }
+      
+      float finalAlpha = uOpacity * auraMask;
 
-      // Alpha: solid center, fading edges for a cleaner look
-      float alpha = uOpacity * smoothstep(1.0, 0.5, edgeDist);
-
-      gl_FragColor = vec4(col, alpha);
+      gl_FragColor = vec4(finalCol, finalAlpha);
     }
   `,
 };
