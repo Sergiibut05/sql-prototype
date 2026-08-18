@@ -7,6 +7,7 @@ import {
   NgZone,
   HostListener,
 } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import * as THREE from 'three';
 import ThreeForceGraph from 'three-forcegraph';
 import GUI from 'lil-gui';
@@ -32,6 +33,7 @@ import { setupGUI } from './systems/er-gui-setup';
 @Component({
   selector: 'app-er-diagram',
   standalone: true,
+  imports: [FormsModule],
   templateUrl: './er-diagram.component.html',
   styleUrls: ['./er-diagram.component.scss'],
 })
@@ -44,7 +46,12 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
   currentStep = 0;
   totalSteps = 0;
   isRunning = false;
-  showQuery = false;
+  showQuery = true;
+
+  /** 'demo' auto-plays the sample queries; 'custom' lets the visitor type their own SQL. */
+  mode: 'demo' | 'custom' = 'demo';
+  sqlInput = '';
+  parseError: string | null = null;
 
   // ── Debug params (single source of truth for all tunable values) ──────────
   private p: ErDebugParams = createDefaultParams();
@@ -72,14 +79,15 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
     private sqlglotParser: SqlglotParserService,
     public simulator: QuerySimulatorService,
     private ngZone: NgZone,
-  ) { }
+  ) {
+    this.totalSteps = this.simulator.totalSteps;
+  }
 
   // ================================================================
   //  Lifecycle
   // ================================================================
 
   ngAfterViewInit(): void {
-    this.totalSteps = this.simulator.totalSteps;
     const canvas = this.canvasRef.nativeElement;
 
     // 1. Core scene (renderer, camera, lights, ground)
@@ -168,9 +176,13 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
       this.hoverManager.mouse.set(-999, -999);
     });
 
-    // 12. Start
-    this.subscribeToSimulator();
-    this.simulator.start();
+    // 12. Start (deferred a tick so the first simulator emission lands in its
+    // own change-detection cycle instead of mutating state mid-render, which
+    // Angular's dev mode flags as ExpressionChangedAfterItHasBeenChecked).
+    setTimeout(() => {
+      this.subscribeToSimulator();
+      this.simulator.start();
+    });
     this.ngZone.runOutsideAngular(() => this.animate());
   }
 
@@ -203,7 +215,7 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
    * Parse SQL with the selected engine and hand the result to the
    * transition manager. sqlglot is async (HTTP); node-sql-parser is sync.
    */
-  private parseAndTransition(sql: string): void {
+  private parseAndTransition(sql: string, onDone?: (data: GraphData) => void): void {
     if (this.p.useParser === 'sqlglot') {
       this.sqlglotParser.parseQuery(sql, 'postgres').subscribe((data: GraphData) => {
         if (data.nodes.length === 0) {
@@ -211,16 +223,55 @@ export class ErDiagramComponent implements AfterViewInit, OnDestroy {
           const fallback = this.sqlParser.parseQueryToGraph(sql);
           this.processKeys(fallback);
           this.transitionMgr.handleStepTransition(fallback);
+          onDone?.(fallback);
         } else {
           this.processKeys(data);
           this.transitionMgr.handleStepTransition(data);
+          onDone?.(data);
         }
       });
     } else {
       const data = this.sqlParser.parseQueryToGraph(sql);
       this.processKeys(data);
       this.transitionMgr.handleStepTransition(data);
+      onDone?.(data);
     }
+  }
+
+  // ================================================================
+  //  Custom SQL input (visitor-facing)
+  // ================================================================
+
+  /** Switch to the "write your own SQL" mode, pausing the auto-playing demo. */
+  switchToCustom(): void {
+    if (this.mode === 'custom') return;
+    this.mode = 'custom';
+    this.parseError = null;
+    this.simulator.stop();
+    if (!this.sqlInput.trim()) this.sqlInput = this.currentQuery;
+    this.showQuery = true;
+  }
+
+  /** Switch back to the auto-playing demo. */
+  switchToDemo(): void {
+    if (this.mode === 'demo') return;
+    this.mode = 'demo';
+    this.parseError = null;
+    this.simulator.start();
+  }
+
+  /** Parse and visualize whatever SQL the visitor typed into the editor. */
+  runCustomQuery(): void {
+    const sql = this.sqlInput.trim();
+    if (!sql) return;
+
+    this.parseError = null;
+    this.currentQuery = sql;
+    this.parseAndTransition(sql, (data) => {
+      if (data.nodes.length === 0) {
+        this.parseError = 'No se han detectado tablas: revisa la sintaxis SQL.';
+      }
+    });
   }
 
   /**

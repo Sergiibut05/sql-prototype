@@ -1,32 +1,61 @@
 <canvas #rendererCanvas></canvas>
 
-<div class="controls-panel">
-  <div class="step-info">
-    <span class="step-label">Step</span>
-    <span class="step-num">{{ currentStep }}</span>
-    <span class="step-sep">/</span>
-    <span class="step-total">{{ totalSteps }}</span>
+<div class="top-bar">
+  <div class="brand">SQL <span class="arrow">&#8594;</span> 3D ER</div>
+  <div class="mode-toggle">
+    <button [class.active]="mode === 'demo'" (click)="switchToDemo()">Demo</button>
+    <button [class.active]="mode === 'custom'" (click)="switchToCustom()">Tu SQL</button>
   </div>
-  <div class="controls">
-    <button (click)="simulator.prev()" [disabled]="currentStep <= 1" title="Previous">
-      &#9664;
-    </button>
-    <button (click)="isRunning ? simulator.stop() : simulator.start()"
-            [class.active]="isRunning" title="Play/Pause">
-      {{ isRunning ? '\u23F8' : '\u25B6' }}
-    </button>
-    <button (click)="simulator.next()" [disabled]="currentStep >= totalSteps" title="Next">
-      &#9654;
-    </button>
-  </div>
-  <div class="hint">Press <kbd>H</kbd> for debug GUI</div>
 </div>
 
-<div class="query-panel" [class.expanded]="showQuery">
+@if (mode === 'demo') {
+  <div class="controls-panel">
+    <div class="step-info">
+      <span class="step-label">Step</span>
+      <span class="step-num">{{ currentStep }}</span>
+      <span class="step-sep">/</span>
+      <span class="step-total">{{ totalSteps }}</span>
+    </div>
+    <div class="controls">
+      <button (click)="simulator.prev()" [disabled]="currentStep <= 1" title="Previous">
+        &#9664;
+      </button>
+      <button (click)="isRunning ? simulator.stop() : simulator.start()"
+              [class.active]="isRunning" title="Play/Pause">
+        {{ isRunning ? '\u23F8' : '\u25B6' }}
+      </button>
+      <button (click)="simulator.next()" [disabled]="currentStep >= totalSteps" title="Next">
+        &#9654;
+      </button>
+    </div>
+    <div class="hint">Press <kbd>H</kbd> for debug GUI</div>
+  </div>
+}
+
+<div class="query-panel" [class.expanded]="showQuery" [class.custom]="mode === 'custom'">
   <button class="toggle-query" (click)="showQuery = !showQuery">
-    {{ showQuery ? 'Hide SQL' : 'Show SQL' }}
+    {{ showQuery ? 'Ocultar' : (mode === 'custom' ? 'Editar SQL' : 'Ver SQL') }}
   </button>
   @if (showQuery) {
-    <pre class="query-text">{{ currentQuery }}</pre>
+    @if (mode === 'custom') {
+      <div class="editor">
+        <textarea
+          [(ngModel)]="sqlInput"
+          spellcheck="false"
+          placeholder="SELECT * FROM your_table t JOIN other_table o ON t.id = o.table_id"
+          (keydown.control.enter)="runCustomQuery()"
+          (keydown.meta.enter)="runCustomQuery()"
+        ></textarea>
+        <div class="editor-actions">
+          <button class="run-btn" (click)="runCustomQuery()">&#9654; Visualizar</button>
+          <span class="editor-hint">Ctrl/Cmd + Enter</span>
+        </div>
+        @if (parseError) {
+          <div class="parse-error">{{ parseError }}</div>
+        }
+      </div>
+    } @else {
+      <pre class="query-text">{{ currentQuery }}</pre>
+    }
   }
 </div>

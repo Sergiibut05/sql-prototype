@@ -7,63 +7,59 @@ export class QuerySimulatorService implements OnDestroy {
 
   private readonly queries: string[] = [
     // Step 1: Single table
-    `SELECT * FROM torcal_erp.aut_autoescuela au`,
+    `SELECT * FROM shop.customers c`,
 
-    // Step 2: Add alumno_matricula
-    `SELECT au.aut_pk, au.aut_denominacion, am.alumat_pk, am.alu_pk
-FROM torcal_erp.aut_autoescuela au
-JOIN torcal_erp.alumat_alumno_matricula am ON au.aut_pk = am.aut_pk`,
+    // Step 2: Add orders
+    `SELECT c.customer_id, c.full_name, o.order_id, o.order_date
+FROM shop.customers c
+JOIN shop.orders o ON c.customer_id = o.customer_id`,
 
-    // Step 3: Add alumno_examen_permiso
-    `SELECT au.aut_pk, am.alumat_pk, aep.aluexps_pk
-FROM torcal_erp.aut_autoescuela au
-JOIN torcal_erp.alumat_alumno_matricula am ON au.aut_pk = am.aut_pk
-JOIN torcal_erp.aluexps_alumno_examen_permiso aep ON am.alumat_pk = aep.alumat_alumno_matricula_alumat_pk`,
+    // Step 3: Add order_items
+    `SELECT c.customer_id, o.order_id, oi.order_item_id, oi.product_id
+FROM shop.customers c
+JOIN shop.orders o ON c.customer_id = o.customer_id
+JOIN shop.order_items oi ON o.order_id = oi.order_id`,
 
-    // Step 4: Add tipo_examen
-    `SELECT au.aut_pk, am.alumat_pk, aep.aluexps_pk, te.text_desc
-FROM torcal_erp.aut_autoescuela au
-JOIN torcal_erp.alumat_alumno_matricula am ON au.aut_pk = am.aut_pk
-JOIN torcal_erp.aluexps_alumno_examen_permiso aep ON am.alumat_pk = aep.alumat_alumno_matricula_alumat_pk
-JOIN torcal_erp.tex_tipo_examen te ON aep.tex_tipo_examen_tex_pk = te.tex_pk`,
+    // Step 4: Add products
+    `SELECT c.customer_id, o.order_id, oi.order_item_id, p.name AS product_name
+FROM shop.customers c
+JOIN shop.orders o ON c.customer_id = o.customer_id
+JOIN shop.order_items oi ON o.order_id = oi.order_id
+JOIN shop.products p ON oi.product_id = p.product_id`,
 
-    // Step 5: Add alumno_permiso
-    `SELECT au.aut_pk, am.alumat_pk, aep.aluexps_pk, te.text_desc, aps.alups_pk
-FROM torcal_erp.aut_autoescuela au
-JOIN torcal_erp.alumat_alumno_matricula am ON au.aut_pk = am.aut_pk
-JOIN torcal_erp.aluexps_alumno_examen_permiso aep ON am.alumat_pk = aep.alumat_alumno_matricula_alumat_pk
-JOIN torcal_erp.tex_tipo_examen te ON aep.tex_tipo_examen_tex_pk = te.tex_pk
-JOIN torcal_erp.alups_alumno_permiso aps ON aep.alups_alumno_permiso_alups_pk = aps.alups_pk`,
+    // Step 5: Add categories
+    `SELECT c.customer_id, o.order_id, p.name AS product_name, cat.name AS category_name
+FROM shop.customers c
+JOIN shop.orders o ON c.customer_id = o.customer_id
+JOIN shop.order_items oi ON o.order_id = oi.order_id
+JOIN shop.products p ON oi.product_id = p.product_id
+JOIN shop.categories cat ON p.category_id = cat.category_id`,
 
-    // Step 6: Add ps_tipo
-    `SELECT au.aut_pk, am.alumat_pk, aep.aluexps_pk, te.text_desc, aps.alups_pk, pt.ps_permiso_dgt
-FROM torcal_erp.aut_autoescuela au
-JOIN torcal_erp.alumat_alumno_matricula am ON au.aut_pk = am.aut_pk
-JOIN torcal_erp.aluexps_alumno_examen_permiso aep ON am.alumat_pk = aep.alumat_alumno_matricula_alumat_pk
-JOIN torcal_erp.tex_tipo_examen te ON aep.tex_tipo_examen_tex_pk = te.tex_pk
-JOIN torcal_erp.alups_alumno_permiso aps ON aep.alups_alumno_permiso_alups_pk = aps.alups_pk
-JOIN torcal_erp.ps_tipo pt ON aps.ps_tipo_ps_pk = pt.ps_pk`,
+    // Step 6: Add reviews
+    `SELECT c.customer_id, o.order_id, p.name AS product_name, cat.name AS category_name, rv.rating
+FROM shop.customers c
+JOIN shop.orders o ON c.customer_id = o.customer_id
+JOIN shop.order_items oi ON o.order_id = oi.order_id
+JOIN shop.products p ON oi.product_id = p.product_id
+JOIN shop.categories cat ON p.category_id = cat.category_id
+JOIN shop.reviews rv ON rv.product_id = p.product_id AND rv.customer_id = c.customer_id`,
 
     // Step 7: Full complex query with subquery
-    `SELECT au.aut_denominacion AS section_name,
-  COUNT(DISTINCT CASE WHEN fa.passed = 1 THEN fa.alu_pk END) AS total_passed,
-  COUNT(DISTINCT fa.alu_pk) AS total_students
-FROM torcal_erp.aut_autoescuela au
+    `SELECT cat.name AS category_name,
+  COUNT(DISTINCT CASE WHEN pr.avg_rating >= 4 THEN pr.customer_id END) AS satisfied_customers,
+  COUNT(DISTINCT pr.customer_id) AS total_customers
+FROM shop.categories cat
 JOIN (
-  SELECT am.alu_pk, am.aut_pk,
-    CASE WHEN SUM(CASE WHEN te.text_desc = 'Teorico' AND aep.aluexps_nconvocatorias = 1 AND aep.aluexps_apto_sn = 1 THEN 1 ELSE 0 END) > 0
-         AND SUM(CASE WHEN te.text_desc = 'Circulacion' AND aep.aluexps_nconvocatorias = 1 AND aep.aluexps_apto_sn = 1 THEN 1 ELSE 0 END) > 0
-    THEN 1 ELSE 0 END AS passed
-  FROM torcal_erp.aluexps_alumno_examen_permiso aep
-  JOIN torcal_erp.tex_tipo_examen te ON aep.tex_tipo_examen_tex_pk = te.tex_pk
-  JOIN torcal_erp.alups_alumno_permiso aps ON aep.alups_alumno_permiso_alups_pk = aps.alups_pk
-  JOIN torcal_erp.ps_tipo pt ON aps.ps_tipo_ps_pk = pt.ps_pk
-  JOIN torcal_erp.alumat_alumno_matricula am ON aep.alumat_alumno_matricula_alumat_pk = am.alumat_pk
-  WHERE pt.ps_permiso_dgt = 'B'
-  GROUP BY am.alu_pk, am.aut_pk
-) AS fa ON au.aut_pk = fa.aut_pk
-GROUP BY au.aut_pk, au.aut_denominacion
-ORDER BY total_passed DESC`,
+  SELECT p.category_id, o.customer_id, AVG(rv.rating) AS avg_rating
+  FROM shop.products p
+  JOIN shop.order_items oi ON oi.product_id = p.product_id
+  JOIN shop.orders o ON o.order_id = oi.order_id
+  JOIN shop.reviews rv ON rv.product_id = p.product_id AND rv.customer_id = o.customer_id
+  WHERE o.status = 'completed'
+  GROUP BY p.category_id, o.customer_id
+) AS pr ON cat.category_id = pr.category_id
+GROUP BY cat.category_id, cat.name
+ORDER BY satisfied_customers DESC`,
   ];
 
   private stepIndex = 0;

@@ -1,59 +1,118 @@
-# SqlPrototype
+# SQL → 3D ER Diagram Visualizer
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.3.7.
+Type a SQL query and watch it turn into an animated, orthogonally-routed 3D
+entity-relationship diagram — tables sink into the ground, resolve their
+joins, and rise back up connected by glowing, particle-lit cables.
 
-## Development server
+**Live demo →** https://sql-prototype.vercel.app
 
-To start a local development server, run:
+![Demo mode: a 5-table e-commerce query rendered as a 3D ER diagram](docs/demo.png)
 
-```bash
-ng serve
+## What it does
+
+- **Write your own SQL** and get an instant 3D diagram of the tables and the
+  join relationships between them (foreign keys, join type, aliases).
+- **Watch the guided demo**: a sample e-commerce query is built up step by
+  step — from a single table to a query with six joins and a subquery — so
+  you can see how the diagram evolves as a query grows.
+- Hover a table to highlight it and its relationships; orbit the camera
+  around the scene.
+
+<p align="center">
+  <img src="docs/custom-mode.png" alt="Tu SQL mode: typing an arbitrary query and visualizing it live" width="720">
+</p>
+
+## How it works
+
+```
+SQL string
+   │
+   ▼
+┌─────────────────────────┐        ┌───────────────────────────────┐
+│ SQL parser (pick one)    │        │  node-sql-parser (in-browser)  │
+│                          │──────► │  sqlglot (Python microservice) │
+└─────────────────────────┘        └───────────────────────────────┘
+   │  AST → { nodes: tables, links: joins }
+   ▼
+┌─────────────────────────┐
+│  d3-force-3d layout      │  positions tables in 3D space
+└─────────────────────────┘
+   │
+   ▼
+┌─────────────────────────┐
+│  Three.js renderer       │  table meshes, orthogonally-routed cable
+│  + custom GLSL shaders   │  geometry, particle flow, bloom/vignette
+└─────────────────────────┘  post-processing, orbit camera
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+Two SQL-to-graph engines are wired up on purpose, as a resilience/comparison
+exercise:
 
-## Code scaffolding
+- **`node-sql-parser`** runs entirely in the browser (default, no backend
+  required, works instantly on Vercel).
+- **`sqlglot`** runs as a Python service — locally as a FastAPI server, in
+  production as a Vercel serverless function (`/api/parse`) — and is more
+  robust on complex dialect-specific SQL. If it can't reach the backend or
+  returns nothing, the app falls back to `node-sql-parser` automatically.
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+You can switch between them from the debug panel (press `H`).
 
-```bash
-ng generate component component-name
-```
+## Tech stack
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+| Layer      | Tech                                                             |
+| ---------- | ----------------------------------------------------------------- |
+| Frontend   | Angular 20 (standalone components, signals)                       |
+| 3D / WebGL | Three.js, `three-forcegraph`, `d3-force-3d`, custom GLSL shaders   |
+| SQL parsing| `node-sql-parser` (client), `sqlglot` (Python backend)             |
+| Backend    | FastAPI (local dev) / Vercel Python serverless function (prod)     |
+| Deployment | Vercel                                                             |
 
-```bash
-ng generate --help
-```
+## Running locally
 
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
+### Frontend
 
 ```bash
-ng test
+npm install
+npm start          # http://localhost:4200
 ```
 
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
+### SQL backend (optional — only needed to use the `sqlglot` engine locally)
 
 ```bash
-ng e2e
+cd backend
+pip install -r requirements.txt
+python main.py      # http://localhost:8000
 ```
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
+With both running, open `http://localhost:4200`, press `H` to open the debug
+panel, and switch the **Parser → Engine** dropdown to `sqlglot`.
 
-## Additional Resources
+### Build
 
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+```bash
+npm run build       # outputs to dist/sql-prototype/browser
+```
+
+## Deployment
+
+The app is deployed on [Vercel](https://vercel.com). `vercel.json` builds the
+Angular app and exposes `api/parse.py` as a serverless function for the
+`sqlglot` engine, so no separate backend hosting is needed in production.
+
+## Project structure
+
+```
+src/app/
+├── core/services/           # SQL parsing services + query simulator
+├── features/er-diagram/     # The 3D visualization feature
+│   ├── systems/              # Scene, camera, particles, transitions, GUI...
+│   └── shaders/               # Custom GLSL (cable, ground, vignette)
+└── shared/models/            # Shared graph (nodes/links) data model
+
+backend/main.py               # FastAPI sqlglot server (local dev)
+api/parse.py                  # Vercel serverless function (production)
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,6 +1,8 @@
 {
-  "name": "sql-prototype",
-  "version": "0.0.0",
+  "name": "sql-to-3d-er",
+  "version": "1.0.0",
+  "description": "Type a SQL query and watch it turn into an animated, orthogonally-routed 3D entity-relationship diagram (Angular + Three.js + sqlglot).",
+  "license": "MIT",
   "scripts": {
     "ng": "ng",
     "start": "ng serve",
